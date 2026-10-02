@@ -204,7 +204,7 @@ class TinyWorldApp {
 
     // Update WebXR interactions
     if (this.xrManager) {
-      this.xrManager.update();
+      this.xrManager.update(delta);
     }
 
     // Render Scene (Three.js automatically routes to VR/AR headset when XR is active)

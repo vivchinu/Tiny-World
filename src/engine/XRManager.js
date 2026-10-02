@@ -6,41 +6,58 @@ export class XRManager {
     this.sm = app.sceneManager;
     this.renderer = this.sm.renderer;
     this.scene = this.sm.scene;
-    this.dioramaRoot = app.dioramaRoot; // Group containing terrain, objects, population
+    this.dioramaRoot = app.dioramaRoot; // Root group containing terrain, structures, population
 
     this.isXRPresenting = false;
     this.xrSession = null;
     this.sessionMode = null; // 'immersive-vr' or 'immersive-ar'
 
-    // Controllers
-    this.controllerRight = null; // Index 0 (dominant / building hand)
-    this.controllerLeft = null;  // Index 1 (palette / manipulation hand)
+    // Controllers & Hand Tracking
+    this.controllerRight = null; // Controller Index 0
+    this.controllerLeft = null;  // Controller Index 1
+    this.handRight = null;       // Hand Index 0
+    this.handLeft = null;        // Hand Index 1
 
     // Raycast & Reticle
     this.raycaster = new THREE.Raycaster();
     this.reticle = null;
-    this.isTriggerDown = false;
+    this.isActionActive = false; // Trigger or Pinch held down
     this.dragStartLocal = new THREE.Vector3();
     this.dragCurrentLocal = new THREE.Vector3();
 
-    // 3D VR Palette
+    // 3D VR Palm Palette
+    this.paletteGroup = null;
     this.paletteButtons = [];
     this.hoveredButton = null;
+    this.isPaletteFacing = false;
+    this.paletteScaleLerp = 0.001;
 
-    // Grip Manipulation
+    // Tabletop Manipulation (Move, Rotate, Scale)
     this.isGrippingRight = false;
     this.isGrippingLeft = false;
-    this.gripInitialHandPos = new THREE.Vector3();
-    this.gripInitialDioramaPos = new THREE.Vector3();
-    this.gripInitialHandDist = 0;
-    this.gripInitialScale = 0.07;
+    this.isPinchingRight = false;
+    this.isPinchingLeft = false;
 
-    // Original scene state before entering XR
+    this.initialHandsDistance = 0;
+    this.initialHandsAngle = 0;
+    this.initialHandsMidpoint = new THREE.Vector3();
+    this.initialDioramaScale = 0.07;
+    this.initialDioramaRotY = 0;
+    this.initialDioramaPos = new THREE.Vector3();
+
+    this.singleGripInitialHandPos = new THREE.Vector3();
+    this.singleGripInitialDioramaPos = new THREE.Vector3();
+
+    // Hand joints tracking indicators
+    this.pinchMarkerRight = null;
+    this.pinchMarkerLeft = null;
+
+    // Saved desktop scene settings
     this.savedBackground = null;
     this.savedFog = null;
 
     this.initXRButtons();
-    this.setupControllers();
+    this.setupControllersAndHands();
   }
 
   async initXRButtons() {
@@ -70,7 +87,7 @@ export class XRManager {
       topActions.prepend(vrBtn);
     }
 
-    // 2. Enter AR / Passthrough Button (for Meta Quest 3 Mixed Reality!)
+    // 2. Enter AR / Passthrough Button (for Meta Quest 3 Mixed Reality)
     if (arSupported) {
       const arBtn = document.createElement('button');
       arBtn.id = 'btn-enter-ar';
@@ -117,24 +134,20 @@ export class XRManager {
     this.isXRPresenting = true;
     document.body.classList.add('xr-active');
 
-    // Save 2D scene background & fog
+    // Save desktop background & fog
     this.savedBackground = this.scene.background;
     this.savedFog = this.scene.fog;
 
-    // Scale diorama to comfortable tabletop miniature size
-    // 0.075 scale: 32m island becomes ~2.4m wide tabletop model!
-    this.dioramaRoot.scale.setScalar(0.07);
-    // Position at comfortable table height (~0.85m) and ~0.8m in front of player
-    this.dioramaRoot.position.set(0, 0.85, -0.85);
-    this.dioramaRoot.rotation.set(0, 0, 0);
+    // Reset tabletop position and scale (comfortable table height and distance)
+    this.resetIslandView();
 
     if (mode === 'immersive-ar') {
-      // Mixed Reality Passthrough on Quest 3: transparent background
+      // Quest 3 Color Passthrough: clear background & fog
       this.scene.background = null;
       this.scene.fog = null;
-      this.app.ui.showToast('Quest 3 Passthrough Active: Island on Table');
+      this.app.ui.showToast('Quest 3 Passthrough: Look at your left palm for menu');
     } else {
-      this.app.ui.showToast('WebXR VR Active: Grip to move tabletop');
+      this.app.ui.showToast('WebXR VR: Look at your left palm for menu');
     }
 
     this.app.audio.playBuildChord();
@@ -151,112 +164,186 @@ export class XRManager {
     this.dioramaRoot.position.set(0, 0, 0);
     this.dioramaRoot.rotation.set(0, 0, 0);
 
-    // Restore background & fog
     if (this.savedBackground) this.scene.background = this.savedBackground;
     if (this.savedFog) this.scene.fog = this.savedFog;
 
     this.app.ui.showToast('Exited WebXR');
   }
 
-  setupControllers() {
+  resetIslandView() {
+    this.dioramaRoot.scale.setScalar(0.07);
+    this.dioramaRoot.position.set(0, 0.85, -0.85);
+    this.dioramaRoot.rotation.set(0, 0, 0);
+  }
+
+  rotateIsland(angleRad) {
+    this.dioramaRoot.rotation.y += angleRad;
+    this.app.audio.playPop();
+  }
+
+  scaleIsland(factor) {
+    const cur = this.dioramaRoot.scale.x;
+    const next = THREE.MathUtils.clamp(cur * factor, 0.015, 0.35);
+    this.dioramaRoot.scale.setScalar(next);
+    this.app.audio.playPop();
+  }
+
+  setupControllersAndHands() {
     // -------------------------------------------------------------
-    // Right Controller (Wand / Drawing / Building)
+    // 1. Right & Left Controllers (Touch Plus)
     // -------------------------------------------------------------
     this.controllerRight = this.renderer.xr.getController(0);
     this.scene.add(this.controllerRight);
 
-    // Stylized Pointer Beam
+    this.controllerLeft = this.renderer.xr.getController(1);
+    this.scene.add(this.controllerLeft);
+
+    // Pointer Ray from Right Hand
     const beamGeo = new THREE.BufferGeometry().setFromPoints([
       new THREE.Vector3(0, 0, 0),
-      new THREE.Vector3(0, 0, -4)
+      new THREE.Vector3(0, 0, -3.5)
     ]);
     const beamMat = new THREE.LineBasicMaterial({
       color: 0xf6ad55,
       transparent: true,
-      opacity: 0.75,
+      opacity: 0.8,
       linewidth: 3
     });
     this.pointerBeam = new THREE.Line(beamGeo, beamMat);
     this.controllerRight.add(this.pointerBeam);
 
-    // Reticle Ring that aligns to terrain
+    // Reticle Ring on terrain
     const reticleGeo = new THREE.RingGeometry(0.04, 0.055, 24);
     reticleGeo.rotateX(-Math.PI / 2);
     const reticleMat = new THREE.MeshBasicMaterial({
       color: 0xf6ad55,
       side: THREE.DoubleSide,
       transparent: true,
-      opacity: 0.9
+      opacity: 0.95
     });
     this.reticle = new THREE.Mesh(reticleGeo, reticleMat);
     this.reticle.visible = false;
     this.scene.add(this.reticle);
 
-    // Controller 0 Events
-    this.controllerRight.addEventListener('selectstart', () => this.onTriggerStart());
-    this.controllerRight.addEventListener('selectend', () => this.onTriggerEnd());
+    // Controller Events
+    this.controllerRight.addEventListener('selectstart', () => this.onActionStart());
+    this.controllerRight.addEventListener('selectend', () => this.onActionEnd());
     this.controllerRight.addEventListener('squeezestart', () => this.onGripStart(0));
     this.controllerRight.addEventListener('squeezeend', () => this.onGripEnd(0));
-
-    // -------------------------------------------------------------
-    // Left Controller (Palette / Diorama Grip)
-    // -------------------------------------------------------------
-    this.controllerLeft = this.renderer.xr.getController(1);
-    this.scene.add(this.controllerLeft);
 
     this.controllerLeft.addEventListener('squeezestart', () => this.onGripStart(1));
     this.controllerLeft.addEventListener('squeezeend', () => this.onGripEnd(1));
 
-    // 3D Floating Left Wrist Palette
+    // -------------------------------------------------------------
+    // 2. Direct Hand Tracking (Hands 0 & 1)
+    // -------------------------------------------------------------
+    this.handRight = this.renderer.xr.getHand(0);
+    this.scene.add(this.handRight);
+
+    this.handLeft = this.renderer.xr.getHand(1);
+    this.scene.add(this.handLeft);
+
+    // Visual pinch cursors for index finger tips
+    const pinchGeo = new THREE.SphereGeometry(0.012, 12, 12);
+    const pinchMat = new THREE.MeshBasicMaterial({
+      color: 0xf6ad55,
+      transparent: true,
+      opacity: 0.8
+    });
+
+    this.pinchMarkerRight = new THREE.Mesh(pinchGeo, pinchMat);
+    this.pinchMarkerRight.visible = false;
+    this.scene.add(this.pinchMarkerRight);
+
+    this.pinchMarkerLeft = new THREE.Mesh(pinchGeo, pinchMat.clone());
+    this.pinchMarkerLeft.visible = false;
+    this.scene.add(this.pinchMarkerLeft);
+
+    // -------------------------------------------------------------
+    // 3. Left Hand-Facing Floating Palm Menu
+    // -------------------------------------------------------------
     this.createWristPalette();
   }
 
   createWristPalette() {
     this.paletteGroup = new THREE.Group();
-    // Position just above the left wrist / controller
-    this.paletteGroup.position.set(0, 0.08, -0.06);
-    this.paletteGroup.rotation.x = -Math.PI / 3.5;
-    this.paletteGroup.scale.setScalar(0.75);
+    this.paletteGroup.visible = false;
+    this.paletteGroup.scale.setScalar(0.001);
 
-    // Curved backing panel
-    const panelGeo = new THREE.BoxGeometry(0.24, 0.16, 0.012);
+    // Frosted glass backing plate
+    const panelGeo = new THREE.BoxGeometry(0.24, 0.22, 0.012);
     const panelMat = new THREE.MeshStandardMaterial({
-      color: 0x1a202c,
-      roughness: 0.5,
+      color: 0x111827,
+      roughness: 0.35,
       metalness: 0.2,
       transparent: true,
-      opacity: 0.88
+      opacity: 0.92
     });
     const panel = new THREE.Mesh(panelGeo, panelMat);
     this.paletteGroup.add(panel);
 
-    // 3D Tool Buttons on Palette
-    const tools = [
+    // Border glow rim
+    const borderGeo = new THREE.BoxGeometry(0.246, 0.226, 0.008);
+    const borderMat = new THREE.MeshBasicMaterial({ color: 0xf6ad55, transparent: true, opacity: 0.4 });
+    const border = new THREE.Mesh(borderGeo, borderMat);
+    border.position.z = -0.003;
+    this.paletteGroup.add(border);
+
+    // Menu Title
+    const titleCanvas = document.createElement('canvas');
+    titleCanvas.width = 256;
+    titleCanvas.height = 64;
+    const tCtx = titleCanvas.getContext('2d');
+    tCtx.fillStyle = '#fed7aa';
+    tCtx.font = 'bold 30px sans-serif';
+    tCtx.textAlign = 'center';
+    tCtx.fillText('🌱 Tiny World', 128, 42);
+
+    const titleTex = new THREE.CanvasTexture(titleCanvas);
+    const titleMat = new THREE.MeshBasicMaterial({ map: titleTex, transparent: true });
+    const titlePlane = new THREE.Mesh(new THREE.PlaneGeometry(0.18, 0.042), titleMat);
+    titlePlane.position.set(0, 0.088, 0.01);
+    this.paletteGroup.add(titlePlane);
+
+    // Palette Buttons layout (3 columns x 4 rows)
+    const buttons = [
+      // Row 1: Building Basics
       { id: 'house', label: '🏠', name: 'House' },
       { id: 'wall', label: '🧱', name: 'Wall' },
       { id: 'path', label: '🛤️', name: 'Path' },
+
+      // Row 2: Nature & Details
       { id: 'tree', label: '🌳', name: 'Tree' },
       { id: 'pond', label: '💧', name: 'Pond' },
       { id: 'prop', label: '🏮', name: 'Props' },
+
+      // Row 3: Actions & Environment
       { id: 'demolish', label: '🔨', name: 'Clear' },
-      { id: 'time', label: '☀️', name: 'Sun' },
-      { id: 'undo', label: '↩️', name: 'Undo' }
+      { id: 'time', label: '☀️', name: 'Time' },
+      { id: 'undo', label: '↩️', name: 'Undo' },
+
+      // Row 4: Rotate & Scale Island
+      { id: 'rotate-left', label: '↺', name: 'Rotate 45°' },
+      { id: 'scale-up', label: '➕', name: 'Scale +' },
+      { id: 'scale-down', label: '➖', name: 'Scale -' }
     ];
 
     const cols = 3;
-    const btnSize = 0.038;
-    const gap = 0.046;
+    const btnSize = 0.042;
+    const gapX = 0.056;
+    const gapY = 0.046;
+    const startY = 0.044;
 
-    tools.forEach((t, i) => {
+    buttons.forEach((t, i) => {
       const col = i % cols;
       const row = Math.floor(i / cols);
 
-      const bx = (col - 1) * gap;
-      const by = (1 - row) * gap;
+      const bx = (col - 1) * gapX;
+      const by = startY - row * gapY;
 
       const btnGeo = new THREE.BoxGeometry(btnSize, btnSize, 0.016);
       const btnMat = new THREE.MeshStandardMaterial({
-        color: 0x334155,
+        color: (t.id.startsWith('rotate') || t.id.startsWith('scale')) ? 0x1e293b : 0x334155,
         roughness: 0.4,
         metalness: 0.1
       });
@@ -264,13 +351,13 @@ export class XRManager {
       btn.position.set(bx, by, 0.01);
       btn.userData = { toolId: t.id, toolName: t.name };
 
-      // Icon canvas texture
+      // Button Icon Texture
       const canvas = document.createElement('canvas');
       canvas.width = 128;
       canvas.height = 128;
       const ctx = canvas.getContext('2d');
-      ctx.fillStyle = '#f8fafc';
-      ctx.font = '72px sans-serif';
+      ctx.fillStyle = '#ffffff';
+      ctx.font = '68px sans-serif';
       ctx.textAlign = 'center';
       ctx.textBaseline = 'middle';
       ctx.fillText(t.label, 64, 64);
@@ -285,15 +372,15 @@ export class XRManager {
       this.paletteButtons.push(btn);
     });
 
-    this.controllerLeft.add(this.paletteGroup);
+    this.scene.add(this.paletteGroup);
   }
 
-  // Trigger Action (Point & Draw / Click)
-  onTriggerStart() {
+  // Trigger or Hand Pinch Start
+  onActionStart() {
     this.pulseHaptic(this.controllerRight, 0.4, 25);
 
-    // 1. Check if clicking on the 3D Wrist Palette
-    if (this.hoveredButton) {
+    // 1. Check if clicking on the Left Palm Menu
+    if (this.paletteGroup.visible && this.hoveredButton) {
       const tid = this.hoveredButton.userData.toolId;
       this.handlePaletteClick(tid);
       this.pulseHaptic(this.controllerRight, 0.8, 50);
@@ -301,13 +388,13 @@ export class XRManager {
     }
 
     // 2. Check if pointing at island
-    const hitWorld = this.getControllerGroundHit();
+    const hitWorld = this.getPointerGroundHit();
     if (!hitWorld) return;
 
     // Convert world hit point into Diorama Local Space
     const hitLocal = this.worldToDioramaLocal(hitWorld);
 
-    this.isTriggerDown = true;
+    this.isActionActive = true;
     this.dragStartLocal.copy(hitLocal);
     this.dragCurrentLocal.copy(hitLocal);
 
@@ -324,9 +411,9 @@ export class XRManager {
     }
   }
 
-  onTriggerEnd() {
-    if (!this.isTriggerDown) return;
-    this.isTriggerDown = false;
+  onActionEnd() {
+    if (!this.isActionActive) return;
+    this.isActionActive = false;
 
     this.app.removePreview();
 
@@ -383,6 +470,18 @@ export class XRManager {
       const nextTime = times[(times.indexOf(cur) + 1) % times.length] || 12.0;
       this.sm.setTimeOfDay(nextTime);
       this.app.ui.showToast('Time changed');
+    } else if (toolId === 'rotate-left') {
+      this.rotateIsland(-Math.PI / 4);
+      this.app.ui.showToast('Rotated 45° ↺');
+    } else if (toolId === 'rotate-right') {
+      this.rotateIsland(Math.PI / 4);
+      this.app.ui.showToast('Rotated 45° ↻');
+    } else if (toolId === 'scale-up') {
+      this.scaleIsland(1.25);
+      this.app.ui.showToast('Scaled Up ➕');
+    } else if (toolId === 'scale-down') {
+      this.scaleIsland(0.8);
+      this.app.ui.showToast('Scaled Down ➖');
     } else {
       this.app.ui.selectTool(toolId);
       this.app.ui.showToast(`Selected ${toolId.toUpperCase()}`);
@@ -390,7 +489,10 @@ export class XRManager {
   }
 
   handleXRDemolish() {
-    this.raycaster.set(this.controllerRight.position, this.getControllerDirection(this.controllerRight));
+    const origin = this.getRightPointerOrigin();
+    const dir = this.getRightPointerDirection();
+    this.raycaster.set(origin, dir);
+
     const allMeshes = [];
     this.app.world.objects.forEach((obj) => {
       obj.traverse((child) => {
@@ -412,22 +514,12 @@ export class XRManager {
     }
   }
 
-  // Grip Manipulation (Pick up, Rotate, Scale Miniature Island)
+  // Grip Manipulation (Controllers)
   onGripStart(controllerIdx) {
     if (controllerIdx === 0) this.isGrippingRight = true;
     if (controllerIdx === 1) this.isGrippingLeft = true;
 
-    if (this.isGrippingRight && this.isGrippingLeft) {
-      // Two-handed scale mode
-      this.gripInitialHandDist = this.controllerRight.position.distanceTo(this.controllerLeft.position);
-      this.gripInitialScale = this.dioramaRoot.scale.x;
-    } else {
-      // Single hand move mode
-      const ctrl = controllerIdx === 0 ? this.controllerRight : this.controllerLeft;
-      this.gripInitialHandPos.copy(ctrl.position);
-      this.gripInitialDioramaPos.copy(this.dioramaRoot.position);
-    }
-
+    this.captureInitialManipulationState();
     this.pulseHaptic(controllerIdx === 0 ? this.controllerRight : this.controllerLeft, 0.5, 40);
   }
 
@@ -436,29 +528,244 @@ export class XRManager {
     if (controllerIdx === 1) this.isGrippingLeft = false;
   }
 
-  updateGripManipulation() {
-    if (this.isGrippingRight && this.isGrippingLeft) {
-      // Two-handed stretch / pinch scaling
-      const curDist = this.controllerRight.position.distanceTo(this.controllerLeft.position);
-      if (this.gripInitialHandDist > 0.05) {
-        const factor = curDist / this.gripInitialHandDist;
-        const newScale = THREE.MathUtils.clamp(this.gripInitialScale * factor, 0.02, 0.35);
-        this.dioramaRoot.scale.setScalar(newScale);
+  captureInitialManipulationState() {
+    const posR = this.getRightHandWorldPosition();
+    const posL = this.getLeftHandWorldPosition();
+
+    this.initialHandsDistance = posR.distanceTo(posL);
+    this.initialHandsMidpoint.copy(posR).add(posL).multiplyScalar(0.5);
+
+    const dx = posR.x - posL.x;
+    const dz = posR.z - posL.z;
+    this.initialHandsAngle = Math.atan2(dx, dz);
+
+    this.initialDioramaScale = this.dioramaRoot.scale.x;
+    this.initialDioramaRotY = this.dioramaRoot.rotation.y;
+    this.initialDioramaPos.copy(this.dioramaRoot.position);
+
+    // Single hand reference
+    this.singleGripInitialHandPos.copy(this.isGrippingRight ? posR : posL);
+  }
+
+  // Detect and update Hand Tracking (Pinch & Palm Facing)
+  updateHandTracking(delta) {
+    const session = this.renderer.xr.getSession();
+    if (!session) return;
+
+    let hasHandRight = false;
+    let hasHandLeft = false;
+
+    // Check hand joints
+    if (this.handRight && this.handRight.joints && this.handRight.joints['index-finger-tip']) {
+      const indexTip = this.handRight.joints['index-finger-tip'];
+      const thumbTip = this.handRight.joints['thumb-tip'];
+
+      if (indexTip.position && thumbTip.position) {
+        hasHandRight = true;
+        const pinchDist = indexTip.position.distanceTo(thumbTip.position);
+        const isPinching = pinchDist < 0.024; // 2.4cm pinch threshold
+
+        // Update pinch cursor
+        this.pinchMarkerRight.position.copy(indexTip.position).lerp(thumbTip.position, 0.5);
+        this.pinchMarkerRight.visible = true;
+
+        if (isPinching && !this.isPinchingRight) {
+          this.isPinchingRight = true;
+          this.pinchMarkerRight.scale.setScalar(1.5);
+          this.onActionStart();
+        } else if (!isPinching && this.isPinchingRight) {
+          this.isPinchingRight = false;
+          this.pinchMarkerRight.scale.setScalar(1.0);
+          this.onActionEnd();
+        }
       }
-    } else if (this.isGrippingRight) {
-      const delta = this.controllerRight.position.clone().sub(this.gripInitialHandPos);
-      this.dioramaRoot.position.copy(this.gripInitialDioramaPos).add(delta);
-    } else if (this.isGrippingLeft) {
-      const delta = this.controllerLeft.position.clone().sub(this.gripInitialHandPos);
-      this.dioramaRoot.position.copy(this.gripInitialDioramaPos).add(delta);
+    }
+
+    if (this.handLeft && this.handLeft.joints && this.handLeft.joints['index-finger-tip']) {
+      const indexTip = this.handLeft.joints['index-finger-tip'];
+      const thumbTip = this.handLeft.joints['thumb-tip'];
+
+      if (indexTip.position && thumbTip.position) {
+        hasHandLeft = true;
+        const pinchDist = indexTip.position.distanceTo(thumbTip.position);
+        const isPinching = pinchDist < 0.024;
+
+        this.pinchMarkerLeft.position.copy(indexTip.position).lerp(thumbTip.position, 0.5);
+        this.pinchMarkerLeft.visible = true;
+
+        if (isPinching && !this.isPinchingLeft) {
+          this.isPinchingLeft = true;
+          this.captureInitialManipulationState();
+        } else if (!isPinching && this.isPinchingLeft) {
+          this.isPinchingLeft = false;
+        }
+      }
+    }
+
+    if (!hasHandRight) this.pinchMarkerRight.visible = false;
+    if (!hasHandLeft) this.pinchMarkerLeft.visible = false;
+  }
+
+  // Detect if Left Palm is facing user's eyes & smoothly animate palette
+  updatePalmFacingMenu(delta) {
+    if (!this.paletteGroup) return;
+
+    // Get Head / Camera position
+    const cam = this.renderer.xr.getCamera();
+    const headPos = new THREE.Vector3();
+    cam.getWorldPosition(headPos);
+
+    // Get Left Hand / Wrist position and orientation
+    let leftPos = new THREE.Vector3();
+    let leftQuat = new THREE.Quaternion();
+
+    if (this.handLeft && this.handLeft.joints && this.handLeft.joints['wrist'] && this.handLeft.joints['wrist'].visible) {
+      this.handLeft.joints['wrist'].getWorldPosition(leftPos);
+      this.handLeft.joints['wrist'].getWorldQuaternion(leftQuat);
+    } else {
+      this.controllerLeft.getWorldPosition(leftPos);
+      this.controllerLeft.getWorldQuaternion(leftQuat);
+    }
+
+    // Vector from left hand to eyes
+    const toHead = headPos.clone().sub(leftPos).normalize();
+
+    // Palm normal vector: points outwards from palm face
+    const palmNormalLocal = new THREE.Vector3(0.2, 0.85, -0.3).normalize();
+    const palmNormalWorld = palmNormalLocal.clone().applyQuaternion(leftQuat);
+
+    // Dot product: > 0.25 means the palm is tilted towards the user's face!
+    const facingDot = palmNormalWorld.dot(toHead);
+    this.isPaletteFacing = facingDot > 0.25 && leftPos.distanceTo(headPos) < 0.8;
+
+    // Target scale: 0.85 when facing, 0.001 when facing away
+    const targetScale = this.isPaletteFacing ? 0.85 : 0.001;
+    this.paletteScaleLerp = THREE.MathUtils.lerp(this.paletteScaleLerp, targetScale, delta * 12.0);
+
+    if (this.paletteScaleLerp > 0.05) {
+      this.paletteGroup.visible = true;
+      this.paletteGroup.scale.setScalar(this.paletteScaleLerp);
+
+      // Position palette gracefully 7cm above the palm facing the player
+      const offset = new THREE.Vector3(0.02, 0.08, 0.02).applyQuaternion(leftQuat);
+      this.paletteGroup.position.copy(leftPos).add(offset);
+      // Billboard angle towards head
+      this.paletteGroup.quaternion.copy(leftQuat);
+    } else {
+      this.paletteGroup.visible = false;
+      this.paletteGroup.scale.setScalar(0.001);
     }
   }
 
-  // Raycasting & Coordinate Helpers
-  getControllerDirection(controller) {
+  // Two-Handed and Thumbstick Manipulation: Move, Rotate, Scale Up/Down
+  updateManipulation(delta) {
+    const session = this.renderer.xr.getSession();
+
+    // 1. Check Thumbsticks on Quest 3 Touch Plus Controllers
+    if (session && session.inputSources) {
+      for (const source of session.inputSources) {
+        if (source.gamepad && source.gamepad.axes && source.gamepad.axes.length >= 4) {
+          // Right controller thumbstick: rotate and scale
+          if (source.handedness === 'right') {
+            const axisX = source.gamepad.axes[2]; // Horizontal: Rotate
+            const axisY = source.gamepad.axes[3]; // Vertical: Scale Up / Down
+
+            if (Math.abs(axisX) > 0.18) {
+              this.dioramaRoot.rotation.y += axisX * delta * 2.4;
+            }
+
+            if (Math.abs(axisY) > 0.18) {
+              const scaleDelta = 1.0 - axisY * delta * 1.4;
+              const newScale = THREE.MathUtils.clamp(this.dioramaRoot.scale.x * scaleDelta, 0.015, 0.35);
+              this.dioramaRoot.scale.setScalar(newScale);
+            }
+          }
+        }
+      }
+    }
+
+    // 2. Two-Handed Manipulation (Grip or Hand Tracking Pinch on both hands)
+    const bothActive = (this.isGrippingRight && this.isGrippingLeft) || (this.isPinchingRight && this.isPinchingLeft);
+
+    if (bothActive) {
+      const posR = this.getRightHandWorldPosition();
+      const posL = this.getLeftHandWorldPosition();
+
+      // Scale Up / Down by hand distance
+      const curDist = posR.distanceTo(posL);
+      if (this.initialHandsDistance > 0.04) {
+        const factor = curDist / this.initialHandsDistance;
+        const newScale = THREE.MathUtils.clamp(this.initialDioramaScale * factor, 0.015, 0.35);
+        this.dioramaRoot.scale.setScalar(newScale);
+      }
+
+      // Rotate around Y by angle between hands
+      const dx = posR.x - posL.x;
+      const dz = posR.z - posL.z;
+      const curAngle = Math.atan2(dx, dz);
+      const angleDiff = curAngle - this.initialHandsAngle;
+      this.dioramaRoot.rotation.y = this.initialDioramaRotY + angleDiff;
+
+      // Translate by hand midpoint
+      const curMidpoint = posR.clone().add(posL).multiplyScalar(0.5);
+      const deltaMid = curMidpoint.sub(this.initialHandsMidpoint);
+      this.dioramaRoot.position.copy(this.initialDioramaPos).add(deltaMid);
+
+    } else if (this.isGrippingRight || (this.isPinchingRight && !this.reticle.visible)) {
+      // Single hand move
+      const posR = this.getRightHandWorldPosition();
+      const delta = posR.clone().sub(this.singleGripInitialHandPos);
+      this.dioramaRoot.position.copy(this.singleGripInitialDioramaPos).add(delta);
+    } else if (this.isGrippingLeft || this.isPinchingLeft) {
+      const posL = this.getLeftHandWorldPosition();
+      const delta = posL.clone().sub(this.singleGripInitialHandPos);
+      this.dioramaRoot.position.copy(this.singleGripInitialDioramaPos).add(delta);
+    }
+  }
+
+  // Pointer & Hand Helpers
+  getRightPointerOrigin() {
+    if (this.handRight && this.handRight.joints && this.handRight.joints['index-finger-tip'] && this.handRight.joints['index-finger-tip'].visible) {
+      const pos = new THREE.Vector3();
+      this.handRight.joints['index-finger-tip'].getWorldPosition(pos);
+      return pos;
+    }
+    const pos = new THREE.Vector3();
+    this.controllerRight.getWorldPosition(pos);
+    return pos;
+  }
+
+  getRightPointerDirection() {
     const dir = new THREE.Vector3(0, 0, -1);
-    dir.applyQuaternion(controller.quaternion);
+    if (this.handRight && this.handRight.joints && this.handRight.joints['index-finger-tip'] && this.handRight.joints['index-finger-tip'].visible) {
+      const tip = new THREE.Vector3();
+      const phalanx = new THREE.Vector3();
+      this.handRight.joints['index-finger-tip'].getWorldPosition(tip);
+      this.handRight.joints['index-finger-phalanx-distal'].getWorldPosition(phalanx);
+      return tip.sub(phalanx).normalize();
+    }
+    dir.applyQuaternion(this.controllerRight.quaternion);
     return dir;
+  }
+
+  getRightHandWorldPosition() {
+    const pos = new THREE.Vector3();
+    if (this.handRight && this.handRight.joints && this.handRight.joints['wrist'] && this.handRight.joints['wrist'].visible) {
+      this.handRight.joints['wrist'].getWorldPosition(pos);
+    } else {
+      this.controllerRight.getWorldPosition(pos);
+    }
+    return pos;
+  }
+
+  getLeftHandWorldPosition() {
+    const pos = new THREE.Vector3();
+    if (this.handLeft && this.handLeft.joints && this.handLeft.joints['wrist'] && this.handLeft.joints['wrist'].visible) {
+      this.handLeft.joints['wrist'].getWorldPosition(pos);
+    } else {
+      this.controllerLeft.getWorldPosition(pos);
+    }
+    return pos;
   }
 
   worldToDioramaLocal(worldPoint) {
@@ -467,11 +774,12 @@ export class XRManager {
     return local;
   }
 
-  getControllerGroundHit() {
+  getPointerGroundHit() {
     if (!this.app.terrain || !this.app.terrain.raycastMesh) return null;
 
-    const dir = this.getControllerDirection(this.controllerRight);
-    this.raycaster.set(this.controllerRight.position, dir);
+    const origin = this.getRightPointerOrigin();
+    const dir = this.getRightPointerDirection();
+    this.raycaster.set(origin, dir);
 
     const intersects = this.raycaster.intersectObject(this.app.terrain.raycastMesh, false);
     if (intersects.length > 0) {
@@ -483,60 +791,66 @@ export class XRManager {
   pulseHaptic(controller, intensity = 0.5, duration = 40) {
     try {
       const session = this.renderer.xr.getSession();
-      if (!session) return;
+      if (!session || !session.inputSources) return;
 
-      const inputSources = session.inputSources;
-      if (!inputSources) return;
-
-      for (const source of inputSources) {
+      for (const source of session.inputSources) {
         if (source.gamepad && source.gamepad.hapticActuators && source.gamepad.hapticActuators.length > 0) {
           source.gamepad.hapticActuators[0].pulse(intensity, duration);
         }
       }
     } catch (e) {
-      // Haptics optional fallback
+      // Optional fallback
     }
   }
 
-  update() {
+  update(delta = 0.016) {
     if (!this.isXRPresenting) return;
 
-    // Handle Grip Manipulation
-    this.updateGripManipulation();
+    // 1. Detect Hand Tracking (Joints & Pinches)
+    this.updateHandTracking(delta);
 
-    // 1. Raycast against Left Wrist Palette buttons
-    const dir = this.getControllerDirection(this.controllerRight);
-    this.raycaster.set(this.controllerRight.position, dir);
+    // 2. Detect Left Palm Facing to Show / Hide 3D Menu
+    this.updatePalmFacingMenu(delta);
 
-    const paletteHits = this.raycaster.intersectObjects(this.paletteButtons, false);
-    if (paletteHits.length > 0) {
-      const hitBtn = paletteHits[0].object;
-      if (this.hoveredButton !== hitBtn) {
-        if (this.hoveredButton) this.hoveredButton.material.color.setHex(0x334155);
-        this.hoveredButton = hitBtn;
-        hitBtn.material.color.setHex(0xf6ad55); // Highlight
-        this.pulseHaptic(this.controllerRight, 0.2, 15);
-      }
-      this.reticle.visible = false;
-      return;
-    } else {
-      if (this.hoveredButton) {
-        this.hoveredButton.material.color.setHex(0x334155);
-        this.hoveredButton = null;
+    // 3. Handle Terrain Rotation, Scaling Up/Down, and Movement
+    this.updateManipulation(delta);
+
+    // 4. Raycast against Left Palm Menu
+    const origin = this.getRightPointerOrigin();
+    const dir = this.getRightPointerDirection();
+    this.raycaster.set(origin, dir);
+
+    if (this.paletteGroup.visible) {
+      const paletteHits = this.raycaster.intersectObjects(this.paletteButtons, false);
+      if (paletteHits.length > 0) {
+        const hitBtn = paletteHits[0].object;
+        if (this.hoveredButton !== hitBtn) {
+          if (this.hoveredButton) this.hoveredButton.material.color.setHex(0x334155);
+          this.hoveredButton = hitBtn;
+          hitBtn.material.color.setHex(0xf6ad55); // Highlight
+          this.pulseHaptic(this.controllerRight, 0.25, 20);
+        }
+        this.reticle.visible = false;
+        return;
+      } else {
+        if (this.hoveredButton) {
+          this.hoveredButton.material.color.setHex(0x334155);
+          this.hoveredButton = null;
+        }
       }
     }
 
-    // 2. Raycast against Island Ground
-    const groundHit = this.getControllerGroundHit();
+    // 5. Raycast against Island Ground
+    const groundHit = this.getPointerGroundHit();
     if (groundHit) {
       this.reticle.position.copy(groundHit);
       this.reticle.position.y += 0.005;
       this.reticle.visible = true;
 
-      // Reticle scale with diorama scale
+      // Scale reticle with tabletop scale
       this.reticle.scale.setScalar(this.dioramaRoot.scale.x * 12);
 
-      if (this.isTriggerDown) {
+      if (this.isActionActive) {
         const hitLocal = this.worldToDioramaLocal(groundHit);
         this.dragCurrentLocal.copy(hitLocal);
 
