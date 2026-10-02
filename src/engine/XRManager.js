@@ -1,56 +1,332 @@
 import * as THREE from 'three';
 
+// ---------------------------------------------------------------------------
+// Forward-Render Hand Skeleton & Visual Highlight Helper
+// Always renders in front of virtual objects (renderOrder 9999, depthTest false)
+// ---------------------------------------------------------------------------
+const _v1 = new THREE.Vector3();
+const _v2 = new THREE.Vector3();
+const _vDir = new THREE.Vector3();
+const _vUp = new THREE.Vector3(0, 1, 0);
+const _tempQuat = new THREE.Quaternion();
+const _tempPos = new THREE.Vector3();
+
+class HandVisualizer {
+  constructor(scene, handedness = 'right') {
+    this.scene = scene;
+    this.handedness = handedness;
+    this.group = new THREE.Group();
+    this.group.renderOrder = 9999;
+    this.scene.add(this.group);
+
+    this.jointMeshes = {};
+    this.boneCylinders = [];
+
+    // Joint geometries & materials (depthTest false, depthWrite false for forward rendering)
+    const jointGeo = new THREE.SphereGeometry(0.0055, 10, 8);
+    const tipGeo = new THREE.SphereGeometry(0.009, 12, 10);
+
+    this.matStandard = new THREE.MeshBasicMaterial({
+      color: 0x94a3b8, // Clean Slate/Silver
+      transparent: true,
+      opacity: 0.8,
+      depthTest: false,
+      depthWrite: false
+    });
+
+    this.matThumb = new THREE.MeshBasicMaterial({
+      color: 0xfb923c, // Warm Sunset Amber
+      transparent: true,
+      opacity: 0.95,
+      depthTest: false,
+      depthWrite: false
+    });
+
+    this.matIndex = new THREE.MeshBasicMaterial({
+      color: 0xfbbf24, // Electric Gold (Draw / Place / Click)
+      transparent: true,
+      opacity: 0.95,
+      depthTest: false,
+      depthWrite: false
+    });
+
+    this.matMiddle = new THREE.MeshBasicMaterial({
+      color: 0x34d399, // Bright Emerald (Rotate & Zoom)
+      transparent: true,
+      opacity: 0.95,
+      depthTest: false,
+      depthWrite: false
+    });
+
+    this.matLittle = new THREE.MeshBasicMaterial({
+      color: 0x7dd3fc, // Sky Blue (Ring & Pinky)
+      transparent: true,
+      opacity: 0.8,
+      depthTest: false,
+      depthWrite: false
+    });
+
+    // 3D Bone links (cylinders for real volume and high visibility in Quest 3)
+    const boneCylGeo = new THREE.CylinderGeometry(0.003, 0.0035, 1, 6);
+    this.boneMat = new THREE.MeshBasicMaterial({
+      color: 0x60a5fa, // Glowing Cyan/Blue
+      transparent: true,
+      opacity: 0.7,
+      depthTest: false,
+      depthWrite: false
+    });
+
+    // Palm Center glowing disc
+    const palmGeo = new THREE.CircleGeometry(0.016, 16);
+    this.palmDisc = new THREE.Mesh(palmGeo, new THREE.MeshBasicMaterial({
+      color: 0x38bdf8,
+      side: THREE.DoubleSide,
+      transparent: true,
+      opacity: 0.45,
+      depthTest: false,
+      depthWrite: false
+    }));
+    this.palmDisc.renderOrder = 9998;
+    this.palmDisc.visible = false;
+    this.group.add(this.palmDisc);
+
+    // Pinch Halo: Index (Draw / Build active indicator)
+    const ringGeo = new THREE.RingGeometry(0.014, 0.020, 20);
+    this.pinchHaloIndex = new THREE.Mesh(ringGeo, new THREE.MeshBasicMaterial({
+      color: 0xfbbf24,
+      side: THREE.DoubleSide,
+      transparent: true,
+      opacity: 0.95,
+      depthTest: false,
+      depthWrite: false
+    }));
+    this.pinchHaloIndex.renderOrder = 10000;
+    this.pinchHaloIndex.visible = false;
+    this.group.add(this.pinchHaloIndex);
+
+    // Pinch Halo: Middle (Rotate & Zoom active indicator)
+    const middleHaloGeo = new THREE.RingGeometry(0.015, 0.022, 24);
+    this.pinchHaloMiddle = new THREE.Mesh(middleHaloGeo, new THREE.MeshBasicMaterial({
+      color: 0x34d399,
+      side: THREE.DoubleSide,
+      transparent: true,
+      opacity: 0.95,
+      depthTest: false,
+      depthWrite: false
+    }));
+    this.pinchHaloMiddle.renderOrder = 10000;
+    this.pinchHaloMiddle.visible = false;
+    this.group.add(this.pinchHaloMiddle);
+
+    // Standard WebXR 25 joint names
+    this.jointNames = [
+      'wrist',
+      'thumb-metacarpal', 'thumb-phalanx-proximal', 'thumb-phalanx-distal', 'thumb-tip',
+      'index-finger-metacarpal', 'index-finger-phalanx-proximal', 'index-finger-phalanx-intermediate', 'index-finger-phalanx-distal', 'index-finger-tip',
+      'middle-finger-metacarpal', 'middle-finger-phalanx-proximal', 'middle-finger-phalanx-intermediate', 'middle-finger-phalanx-distal', 'middle-finger-tip',
+      'ring-finger-metacarpal', 'ring-finger-phalanx-proximal', 'ring-finger-phalanx-intermediate', 'ring-finger-phalanx-distal', 'ring-finger-tip',
+      'pinky-finger-metacarpal', 'pinky-finger-phalanx-proximal', 'pinky-finger-phalanx-intermediate', 'pinky-finger-phalanx-distal', 'pinky-finger-tip'
+    ];
+
+    // Create joint meshes
+    this.jointNames.forEach((name) => {
+      let mat = this.matStandard;
+      let geo = jointGeo;
+
+      if (name === 'thumb-tip') {
+        mat = this.matThumb;
+        geo = tipGeo;
+      } else if (name === 'index-finger-tip') {
+        mat = this.matIndex;
+        geo = tipGeo;
+      } else if (name === 'middle-finger-tip') {
+        mat = this.matMiddle;
+        geo = tipGeo;
+      } else if (name === 'ring-finger-tip' || name === 'pinky-finger-tip') {
+        mat = this.matLittle;
+        geo = tipGeo;
+      }
+
+      const mesh = new THREE.Mesh(geo, mat);
+      mesh.renderOrder = 9999;
+      mesh.visible = false;
+      this.group.add(mesh);
+      this.jointMeshes[name] = mesh;
+    });
+
+    // Bone chains connecting all joints
+    this.chains = [
+      ['wrist', 'thumb-metacarpal', 'thumb-phalanx-proximal', 'thumb-phalanx-distal', 'thumb-tip'],
+      ['wrist', 'index-finger-metacarpal', 'index-finger-phalanx-proximal', 'index-finger-phalanx-intermediate', 'index-finger-phalanx-distal', 'index-finger-tip'],
+      ['wrist', 'middle-finger-metacarpal', 'middle-finger-phalanx-proximal', 'middle-finger-phalanx-intermediate', 'middle-finger-phalanx-distal', 'middle-finger-tip'],
+      ['wrist', 'ring-finger-metacarpal', 'ring-finger-phalanx-proximal', 'ring-finger-phalanx-intermediate', 'ring-finger-phalanx-distal', 'ring-finger-tip'],
+      ['wrist', 'pinky-finger-metacarpal', 'pinky-finger-phalanx-proximal', 'pinky-finger-phalanx-intermediate', 'pinky-finger-phalanx-distal', 'pinky-finger-tip']
+    ];
+
+    this.chains.forEach((chain) => {
+      for (let i = 0; i < chain.length - 1; i++) {
+        const cyl = new THREE.Mesh(boneCylGeo, this.boneMat);
+        cyl.renderOrder = 9998;
+        cyl.visible = false;
+        cyl.userData = { from: chain[i], to: chain[i + 1] };
+        this.group.add(cyl);
+        this.boneCylinders.push(cyl);
+      }
+    });
+  }
+
+  update(hand, isIndexPinching = false, isMiddlePinching = false) {
+    if (!hand || !hand.joints) {
+      this.group.visible = false;
+      return;
+    }
+
+    const wrist = hand.joints['wrist'];
+    if (!wrist || !wrist.visible) {
+      this.group.visible = false;
+      return;
+    }
+
+    this.group.visible = true;
+
+    // 1. Update joint spheres
+    for (let i = 0; i < this.jointNames.length; i++) {
+      const name = this.jointNames[i];
+      const joint = hand.joints[name];
+      const mesh = this.jointMeshes[name];
+      if (joint && joint.visible) {
+        joint.getWorldPosition(_tempPos);
+        mesh.position.copy(_tempPos);
+        mesh.visible = true;
+      } else {
+        mesh.visible = false;
+      }
+    }
+
+    // 2. Update connecting 3D bone cylinders (real volume, forward-rendered)
+    for (let i = 0; i < this.boneCylinders.length; i++) {
+      const cyl = this.boneCylinders[i];
+      const jFrom = hand.joints[cyl.userData.from];
+      const jTo = hand.joints[cyl.userData.to];
+      if (jFrom && jTo && jFrom.visible && jTo.visible) {
+        jFrom.getWorldPosition(_v1);
+        jTo.getWorldPosition(_v2);
+        const dist = _v1.distanceTo(_v2);
+
+        if (dist > 0.002) {
+          cyl.position.copy(_v1).lerp(_v2, 0.5);
+          _vDir.copy(_v2).sub(_v1).normalize();
+          _tempQuat.setFromUnitVectors(_vUp, _vDir);
+          cyl.quaternion.copy(_tempQuat);
+          cyl.scale.set(1, dist, 1);
+          cyl.visible = true;
+        } else {
+          cyl.visible = false;
+        }
+      } else {
+        cyl.visible = false;
+      }
+    }
+
+    // 3. Palm Center Disc
+    const jMidMeta = hand.joints['middle-finger-metacarpal'];
+    if (wrist && jMidMeta && wrist.visible && jMidMeta.visible) {
+      wrist.getWorldPosition(_v1);
+      jMidMeta.getWorldPosition(_v2);
+      this.palmDisc.position.copy(_v1).lerp(_v2, 0.5);
+      wrist.getWorldQuaternion(_tempQuat);
+      this.palmDisc.quaternion.copy(_tempQuat);
+      this.palmDisc.visible = true;
+    } else {
+      this.palmDisc.visible = false;
+    }
+
+    // 4. Highlight pinch rings (Gold for Index, Emerald for Middle)
+    const thumbMesh = this.jointMeshes['thumb-tip'];
+    const indexMesh = this.jointMeshes['index-finger-tip'];
+    const middleMesh = this.jointMeshes['middle-finger-tip'];
+
+    if (isIndexPinching && thumbMesh && indexMesh && thumbMesh.visible && indexMesh.visible) {
+      this.pinchHaloIndex.visible = true;
+      this.pinchHaloIndex.position.copy(thumbMesh.position).lerp(indexMesh.position, 0.5);
+      this.pinchHaloIndex.lookAt(this.scene.position);
+    } else {
+      this.pinchHaloIndex.visible = false;
+    }
+
+    if (isMiddlePinching && thumbMesh && middleMesh && thumbMesh.visible && middleMesh.visible) {
+      this.pinchHaloMiddle.visible = true;
+      this.pinchHaloMiddle.position.copy(thumbMesh.position).lerp(middleMesh.position, 0.5);
+      this.pinchHaloMiddle.lookAt(this.scene.position);
+    } else {
+      this.pinchHaloMiddle.visible = false;
+    }
+  }
+
+  setVisible(visible) {
+    this.group.visible = visible;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Main XRManager Class
+// ---------------------------------------------------------------------------
 export class XRManager {
   constructor(app) {
     this.app = app;
     this.sm = app.sceneManager;
     this.renderer = this.sm.renderer;
     this.scene = this.sm.scene;
-    this.dioramaRoot = app.dioramaRoot; // Root group containing terrain, structures, population
+    this.dioramaRoot = app.dioramaRoot; // Tabletop diorama group
 
     this.isXRPresenting = false;
     this.xrSession = null;
     this.sessionMode = null; // 'immersive-vr' or 'immersive-ar'
 
     // Controllers & Hand Tracking
-    this.controllerRight = null; // Controller Index 0
-    this.controllerLeft = null;  // Controller Index 1
-    this.handRight = null;       // Hand Index 0
-    this.handLeft = null;        // Hand Index 1
+    this.controllerRight = null;
+    this.controllerLeft = null;
+    this.handRight = null;
+    this.handLeft = null;
+
+    // Forward-Render Hand Visualizers
+    this.visualizerRight = null;
+    this.visualizerLeft = null;
 
     // Raycast & Reticle
     this.raycaster = new THREE.Raycaster();
     this.reticle = null;
-    this.isActionActive = false; // Trigger or Pinch held down
+    this.isActionActive = false; // Index pinch / Trigger held
     this.dragStartLocal = new THREE.Vector3();
     this.dragCurrentLocal = new THREE.Vector3();
 
-    // 3D VR Palm Palette
+    // 3D VR Left Palm Menu
     this.paletteGroup = null;
     this.paletteButtons = [];
     this.hoveredButton = null;
     this.isPaletteFacing = false;
     this.paletteScaleLerp = 0.001;
 
-    // Tabletop Manipulation (Move, Rotate, Scale)
+    // Pinches state (Separate Index from Middle finger)
+    this.isIndexPinchingRight = false;
+    this.isIndexPinchingLeft = false;
+
+    // Middle Finger Pinch (Dedicated Rotate & Zoom)
+    this.isMiddlePinchingRight = false;
+    this.isMiddlePinchingLeft = false;
+
+    this.middlePinchStartPosRight = new THREE.Vector3();
+    this.middlePinchStartPosLeft = new THREE.Vector3();
+    this.middlePinchInitialDioramaRotY = 0;
+    this.middlePinchInitialDioramaScale = 0.07;
+    this.middlePinchInitialHandsDist = 0;
+    this.middlePinchInitialHandsAngle = 0;
+
+    // Grip states (Controllers)
     this.isGrippingRight = false;
     this.isGrippingLeft = false;
-    this.isPinchingRight = false;
-    this.isPinchingLeft = false;
-
-    this.initialHandsDistance = 0;
-    this.initialHandsAngle = 0;
-    this.initialHandsMidpoint = new THREE.Vector3();
-    this.initialDioramaScale = 0.07;
-    this.initialDioramaRotY = 0;
-    this.initialDioramaPos = new THREE.Vector3();
-
     this.singleGripInitialHandPos = new THREE.Vector3();
     this.singleGripInitialDioramaPos = new THREE.Vector3();
-
-    // Hand joints tracking indicators
-    this.pinchMarkerRight = null;
-    this.pinchMarkerLeft = null;
 
     // Saved desktop scene settings
     this.savedBackground = null;
@@ -142,12 +418,11 @@ export class XRManager {
     this.resetIslandView();
 
     if (mode === 'immersive-ar') {
-      // Quest 3 Color Passthrough: clear background & fog
       this.scene.background = null;
       this.scene.fog = null;
-      this.app.ui.showToast('Quest 3 Passthrough: Look at your left palm for menu');
+      this.app.ui.showToast('Quest 3 Passthrough: Look at left palm for menu | Middle pinch to Rotate & Zoom');
     } else {
-      this.app.ui.showToast('WebXR VR: Look at your left palm for menu');
+      this.app.ui.showToast('WebXR VR: Look at left palm for menu | Middle pinch to Rotate & Zoom');
     }
 
     this.app.audio.playBuildChord();
@@ -166,6 +441,10 @@ export class XRManager {
 
     if (this.savedBackground) this.scene.background = this.savedBackground;
     if (this.savedFog) this.scene.fog = this.savedFog;
+
+    if (this.visualizerRight) this.visualizerRight.setVisible(false);
+    if (this.visualizerLeft) this.visualizerLeft.setVisible(false);
+    if (this.manipGizmo) this.manipGizmo.visible = false;
 
     this.app.ui.showToast('Exited WebXR');
   }
@@ -189,9 +468,7 @@ export class XRManager {
   }
 
   setupControllersAndHands() {
-    // -------------------------------------------------------------
-    // 1. Right & Left Controllers (Touch Plus)
-    // -------------------------------------------------------------
+    // 1. Right & Left Controllers
     this.controllerRight = this.renderer.xr.getController(0);
     this.scene.add(this.controllerRight);
 
@@ -234,59 +511,63 @@ export class XRManager {
     this.controllerLeft.addEventListener('squeezestart', () => this.onGripStart(1));
     this.controllerLeft.addEventListener('squeezeend', () => this.onGripEnd(1));
 
-    // -------------------------------------------------------------
     // 2. Direct Hand Tracking (Hands 0 & 1)
-    // -------------------------------------------------------------
     this.handRight = this.renderer.xr.getHand(0);
     this.scene.add(this.handRight);
 
     this.handLeft = this.renderer.xr.getHand(1);
     this.scene.add(this.handLeft);
 
-    // Visual pinch cursors for index finger tips
-    const pinchGeo = new THREE.SphereGeometry(0.012, 12, 12);
-    const pinchMat = new THREE.MeshBasicMaterial({
-      color: 0xf6ad55,
-      transparent: true,
-      opacity: 0.8
-    });
+    // 3. Forward-Render Hand Skeleton Visualizers (Renders above virtual models)
+    this.visualizerRight = new HandVisualizer(this.scene, 'right');
+    this.visualizerLeft = new HandVisualizer(this.scene, 'left');
 
-    this.pinchMarkerRight = new THREE.Mesh(pinchGeo, pinchMat);
-    this.pinchMarkerRight.visible = false;
-    this.scene.add(this.pinchMarkerRight);
-
-    this.pinchMarkerLeft = new THREE.Mesh(pinchGeo, pinchMat.clone());
-    this.pinchMarkerLeft.visible = false;
-    this.scene.add(this.pinchMarkerLeft);
-
-    // -------------------------------------------------------------
-    // 3. Left Hand-Facing Floating Palm Menu
-    // -------------------------------------------------------------
+    // 4. Left Hand-Facing Floating Palm Menu
     this.createWristPalette();
+
+    // 5. Tabletop Manipulation Feedback Indicator Ring (Active during Middle Pinch)
+    const gizmoGeo = new THREE.RingGeometry(1.02, 1.07, 48);
+    gizmoGeo.rotateX(-Math.PI / 2);
+    this.manipGizmo = new THREE.Mesh(gizmoGeo, new THREE.MeshBasicMaterial({
+      color: 0x34d399,
+      side: THREE.DoubleSide,
+      transparent: true,
+      opacity: 0.85,
+      depthTest: false,
+      depthWrite: false
+    }));
+    this.manipGizmo.position.y = -0.15;
+    this.manipGizmo.renderOrder = 9995;
+    this.manipGizmo.visible = false;
+    this.dioramaRoot.add(this.manipGizmo);
   }
 
   createWristPalette() {
     this.paletteGroup = new THREE.Group();
     this.paletteGroup.visible = false;
     this.paletteGroup.scale.setScalar(0.001);
+    this.paletteGroup.renderOrder = 9999;
 
     // Frosted glass backing plate
-    const panelGeo = new THREE.BoxGeometry(0.24, 0.22, 0.012);
+    const panelGeo = new THREE.BoxGeometry(0.25, 0.23, 0.012);
     const panelMat = new THREE.MeshStandardMaterial({
       color: 0x111827,
       roughness: 0.35,
       metalness: 0.2,
       transparent: true,
-      opacity: 0.92
+      opacity: 0.92,
+      depthTest: false
     });
     const panel = new THREE.Mesh(panelGeo, panelMat);
+    panel.renderOrder = 9999;
     this.paletteGroup.add(panel);
 
     // Border glow rim
-    const borderGeo = new THREE.BoxGeometry(0.246, 0.226, 0.008);
-    const borderMat = new THREE.MeshBasicMaterial({ color: 0xf6ad55, transparent: true, opacity: 0.4 });
+    const borderGeo = new THREE.BoxGeometry(0.256, 0.236, 0.008);
+    const borderMat = new THREE.MeshBasicMaterial({ color: 0xf6ad55, transparent: true, opacity: 0.45, depthTest: false });
     const border = new THREE.Mesh(borderGeo, borderMat);
     border.position.z = -0.003;
+    border.renderOrder = 9999;
     this.paletteGroup.add(border);
 
     // Menu Title
@@ -300,9 +581,10 @@ export class XRManager {
     tCtx.fillText('🌱 Tiny World', 128, 42);
 
     const titleTex = new THREE.CanvasTexture(titleCanvas);
-    const titleMat = new THREE.MeshBasicMaterial({ map: titleTex, transparent: true });
+    const titleMat = new THREE.MeshBasicMaterial({ map: titleTex, transparent: true, depthTest: false });
     const titlePlane = new THREE.Mesh(new THREE.PlaneGeometry(0.18, 0.042), titleMat);
-    titlePlane.position.set(0, 0.088, 0.01);
+    titlePlane.position.set(0, 0.092, 0.01);
+    titlePlane.renderOrder = 10000;
     this.paletteGroup.add(titlePlane);
 
     // Palette Buttons layout (3 columns x 4 rows)
@@ -329,10 +611,10 @@ export class XRManager {
     ];
 
     const cols = 3;
-    const btnSize = 0.042;
-    const gapX = 0.056;
-    const gapY = 0.046;
-    const startY = 0.044;
+    const btnSize = 0.044;
+    const gapX = 0.058;
+    const gapY = 0.048;
+    const startY = 0.046;
 
     buttons.forEach((t, i) => {
       const col = i % cols;
@@ -342,13 +624,16 @@ export class XRManager {
       const by = startY - row * gapY;
 
       const btnGeo = new THREE.BoxGeometry(btnSize, btnSize, 0.016);
+      const isControl = (t.id.startsWith('rotate') || t.id.startsWith('scale'));
       const btnMat = new THREE.MeshStandardMaterial({
-        color: (t.id.startsWith('rotate') || t.id.startsWith('scale')) ? 0x1e293b : 0x334155,
+        color: isControl ? 0x1e293b : 0x334155,
         roughness: 0.4,
-        metalness: 0.1
+        metalness: 0.1,
+        depthTest: false
       });
       const btn = new THREE.Mesh(btnGeo, btnMat);
       btn.position.set(bx, by, 0.01);
+      btn.renderOrder = 10000;
       btn.userData = { toolId: t.id, toolName: t.name };
 
       // Button Icon Texture
@@ -363,9 +648,10 @@ export class XRManager {
       ctx.fillText(t.label, 64, 64);
 
       const iconTex = new THREE.CanvasTexture(canvas);
-      const iconMat = new THREE.MeshBasicMaterial({ map: iconTex, transparent: true });
+      const iconMat = new THREE.MeshBasicMaterial({ map: iconTex, transparent: true, depthTest: false });
       const iconPlane = new THREE.Mesh(new THREE.PlaneGeometry(btnSize * 0.85, btnSize * 0.85), iconMat);
       iconPlane.position.z = 0.009;
+      iconPlane.renderOrder = 10001;
       btn.add(iconPlane);
 
       this.paletteGroup.add(btn);
@@ -375,7 +661,7 @@ export class XRManager {
     this.scene.add(this.paletteGroup);
   }
 
-  // Trigger or Hand Pinch Start
+  // Trigger or Index Pinch Start (Action / Draw / Build)
   onActionStart() {
     this.pulseHaptic(this.controllerRight, 0.4, 25);
 
@@ -391,7 +677,6 @@ export class XRManager {
     const hitWorld = this.getPointerGroundHit();
     if (!hitWorld) return;
 
-    // Convert world hit point into Diorama Local Space
     const hitLocal = this.worldToDioramaLocal(hitWorld);
 
     this.isActionActive = true;
@@ -457,6 +742,39 @@ export class XRManager {
       this.app.world.addObject(prop);
       this.app.animSystem.animateGenericSpring(prop);
       this.pulseHaptic(this.controllerRight, 0.6, 50);
+    }
+  }
+
+  // Middle Finger Pinch Start (Rotate & Zoom)
+  onMiddlePinchStart(handIndex) {
+    if (handIndex === 0) {
+      this.isMiddlePinchingRight = true;
+      this.middlePinchStartPosRight.copy(this.getPinchPoint(0, 'middle'));
+    } else {
+      this.isMiddlePinchingLeft = true;
+      this.middlePinchStartPosLeft.copy(this.getPinchPoint(1, 'middle'));
+    }
+
+    this.middlePinchInitialDioramaRotY = this.dioramaRoot.rotation.y;
+    this.middlePinchInitialDioramaScale = this.dioramaRoot.scale.x;
+
+    if (this.isMiddlePinchingRight && this.isMiddlePinchingLeft) {
+      const pR = this.getPinchPoint(0, 'middle');
+      const pL = this.getPinchPoint(1, 'middle');
+      this.middlePinchInitialHandsDist = pR.distanceTo(pL);
+      this.middlePinchInitialHandsAngle = Math.atan2(pR.x - pL.x, pR.z - pL.z);
+    }
+
+    if (this.manipGizmo) this.manipGizmo.visible = true;
+    this.app.audio.playPop();
+  }
+
+  onMiddlePinchEnd(handIndex) {
+    if (handIndex === 0) this.isMiddlePinchingRight = false;
+    if (handIndex === 1) this.isMiddlePinchingLeft = false;
+
+    if (!this.isMiddlePinchingRight && !this.isMiddlePinchingLeft) {
+      if (this.manipGizmo) this.manipGizmo.visible = false;
     }
   }
 
@@ -532,78 +850,113 @@ export class XRManager {
     const posR = this.getRightHandWorldPosition();
     const posL = this.getLeftHandWorldPosition();
 
-    this.initialHandsDistance = posR.distanceTo(posL);
-    this.initialHandsMidpoint.copy(posR).add(posL).multiplyScalar(0.5);
-
-    const dx = posR.x - posL.x;
-    const dz = posR.z - posL.z;
-    this.initialHandsAngle = Math.atan2(dx, dz);
-
-    this.initialDioramaScale = this.dioramaRoot.scale.x;
-    this.initialDioramaRotY = this.dioramaRoot.rotation.y;
-    this.initialDioramaPos.copy(this.dioramaRoot.position);
-
-    // Single hand reference
     this.singleGripInitialHandPos.copy(this.isGrippingRight ? posR : posL);
+    this.singleGripInitialDioramaPos.copy(this.dioramaRoot.position);
   }
 
-  // Detect and update Hand Tracking (Pinch & Palm Facing)
+  // Detect and update Hand Tracking (Joints, Index Pinch, Middle Pinch, Hand Forward Render)
   updateHandTracking(delta) {
     const session = this.renderer.xr.getSession();
     if (!session) return;
 
-    let hasHandRight = false;
-    let hasHandLeft = false;
-
-    // Check hand joints
-    if (this.handRight && this.handRight.joints && this.handRight.joints['index-finger-tip']) {
+    // -------------------------------------------------------------
+    // 1. Right Hand Tracking (Index Pinch vs Middle Pinch)
+    // -------------------------------------------------------------
+    if (this.handRight && this.handRight.joints && this.handRight.joints['wrist'] && this.handRight.joints['wrist'].visible) {
       const indexTip = this.handRight.joints['index-finger-tip'];
+      const middleTip = this.handRight.joints['middle-finger-tip'];
       const thumbTip = this.handRight.joints['thumb-tip'];
 
-      if (indexTip.position && thumbTip.position) {
-        hasHandRight = true;
-        const pinchDist = indexTip.position.distanceTo(thumbTip.position);
-        const isPinching = pinchDist < 0.024; // 2.4cm pinch threshold
+      if (thumbTip && thumbTip.visible) {
+        const indexDist = (indexTip && indexTip.visible) ? indexTip.position.distanceTo(thumbTip.position) : 999;
+        const middleDist = (middleTip && middleTip.visible) ? middleTip.position.distanceTo(thumbTip.position) : 999;
 
-        // Update pinch cursor
-        this.pinchMarkerRight.position.copy(indexTip.position).lerp(thumbTip.position, 0.5);
-        this.pinchMarkerRight.visible = true;
+        // Thresholds with hysteresis
+        const indexThreshold = this.isIndexPinchingRight ? 0.030 : 0.024;
+        const middleThreshold = this.isMiddlePinchingRight ? 0.032 : 0.026;
 
-        if (isPinching && !this.isPinchingRight) {
-          this.isPinchingRight = true;
-          this.pinchMarkerRight.scale.setScalar(1.5);
+        let wantsIndex = indexDist < indexThreshold;
+        let wantsMiddle = middleDist < middleThreshold;
+
+        // Mutually exclusive: closer pinch wins, so rotating never accidentally builds or draws!
+        if (wantsIndex && wantsMiddle) {
+          if (this.isMiddlePinchingRight) {
+            wantsIndex = false;
+          } else if (this.isIndexPinchingRight) {
+            wantsMiddle = false;
+          } else if (middleDist < indexDist) {
+            wantsIndex = false;
+          } else {
+            wantsMiddle = false;
+          }
+        }
+
+        // Apply Index Pinch (Draw / Build / Click)
+        if (wantsIndex && !this.isIndexPinchingRight) {
+          this.isIndexPinchingRight = true;
           this.onActionStart();
-        } else if (!isPinching && this.isPinchingRight) {
-          this.isPinchingRight = false;
-          this.pinchMarkerRight.scale.setScalar(1.0);
+        } else if (!wantsIndex && this.isIndexPinchingRight) {
+          this.isIndexPinchingRight = false;
           this.onActionEnd();
         }
-      }
-    }
 
-    if (this.handLeft && this.handLeft.joints && this.handLeft.joints['index-finger-tip']) {
-      const indexTip = this.handLeft.joints['index-finger-tip'];
-      const thumbTip = this.handLeft.joints['thumb-tip'];
-
-      if (indexTip.position && thumbTip.position) {
-        hasHandLeft = true;
-        const pinchDist = indexTip.position.distanceTo(thumbTip.position);
-        const isPinching = pinchDist < 0.024;
-
-        this.pinchMarkerLeft.position.copy(indexTip.position).lerp(thumbTip.position, 0.5);
-        this.pinchMarkerLeft.visible = true;
-
-        if (isPinching && !this.isPinchingLeft) {
-          this.isPinchingLeft = true;
-          this.captureInitialManipulationState();
-        } else if (!isPinching && this.isPinchingLeft) {
-          this.isPinchingLeft = false;
+        // Apply Middle Finger Pinch (Rotate & Zoom)
+        if (wantsMiddle && !this.isMiddlePinchingRight) {
+          this.onMiddlePinchStart(0);
+        } else if (!wantsMiddle && this.isMiddlePinchingRight) {
+          this.onMiddlePinchEnd(0);
         }
       }
+
+      // Update Forward-Render Hand Skeleton (always on top of virtual models)
+      this.visualizerRight.update(this.handRight, this.isIndexPinchingRight, this.isMiddlePinchingRight);
+    } else {
+      this.visualizerRight.setVisible(false);
     }
 
-    if (!hasHandRight) this.pinchMarkerRight.visible = false;
-    if (!hasHandLeft) this.pinchMarkerLeft.visible = false;
+    // -------------------------------------------------------------
+    // 2. Left Hand Tracking (Index Pinch vs Middle Pinch)
+    // -------------------------------------------------------------
+    if (this.handLeft && this.handLeft.joints && this.handLeft.joints['wrist'] && this.handLeft.joints['wrist'].visible) {
+      const indexTip = this.handLeft.joints['index-finger-tip'];
+      const middleTip = this.handLeft.joints['middle-finger-tip'];
+      const thumbTip = this.handLeft.joints['thumb-tip'];
+
+      if (thumbTip && thumbTip.visible) {
+        const indexDist = (indexTip && indexTip.visible) ? indexTip.position.distanceTo(thumbTip.position) : 999;
+        const middleDist = (middleTip && middleTip.visible) ? middleTip.position.distanceTo(thumbTip.position) : 999;
+
+        const indexThreshold = this.isIndexPinchingLeft ? 0.030 : 0.024;
+        const middleThreshold = this.isMiddlePinchingLeft ? 0.032 : 0.026;
+
+        let wantsIndex = indexDist < indexThreshold;
+        let wantsMiddle = middleDist < middleThreshold;
+
+        if (wantsIndex && wantsMiddle) {
+          if (this.isMiddlePinchingLeft) {
+            wantsIndex = false;
+          } else if (this.isIndexPinchingLeft) {
+            wantsMiddle = false;
+          } else if (middleDist < indexDist) {
+            wantsIndex = false;
+          } else {
+            wantsMiddle = false;
+          }
+        }
+
+        this.isIndexPinchingLeft = wantsIndex;
+
+        if (wantsMiddle && !this.isMiddlePinchingLeft) {
+          this.onMiddlePinchStart(1);
+        } else if (!wantsMiddle && this.isMiddlePinchingLeft) {
+          this.onMiddlePinchEnd(1);
+        }
+      }
+
+      this.visualizerLeft.update(this.handLeft, this.isIndexPinchingLeft, this.isMiddlePinchingLeft);
+    } else {
+      this.visualizerLeft.setVisible(false);
+    }
   }
 
   // Detect if Left Palm is facing user's eyes & smoothly animate palette
@@ -636,7 +989,7 @@ export class XRManager {
 
     // Dot product: > 0.25 means the palm is tilted towards the user's face!
     const facingDot = palmNormalWorld.dot(toHead);
-    this.isPaletteFacing = facingDot > 0.25 && leftPos.distanceTo(headPos) < 0.8;
+    this.isPaletteFacing = facingDot > 0.25 && leftPos.distanceTo(headPos) < 0.85;
 
     // Target scale: 0.85 when facing, 0.001 when facing away
     const targetScale = this.isPaletteFacing ? 0.85 : 0.001;
@@ -646,29 +999,27 @@ export class XRManager {
       this.paletteGroup.visible = true;
       this.paletteGroup.scale.setScalar(this.paletteScaleLerp);
 
-      // Position palette gracefully 7cm above the palm facing the player
+      // Position palette gracefully 8cm above the palm facing the player's eyes
       const offset = new THREE.Vector3(0.02, 0.08, 0.02).applyQuaternion(leftQuat);
       this.paletteGroup.position.copy(leftPos).add(offset);
-      // Billboard angle towards head
-      this.paletteGroup.quaternion.copy(leftQuat);
+      this.paletteGroup.lookAt(headPos);
     } else {
       this.paletteGroup.visible = false;
       this.paletteGroup.scale.setScalar(0.001);
     }
   }
 
-  // Two-Handed and Thumbstick Manipulation: Move, Rotate, Scale Up/Down
+  // Middle Finger Pinch Rotation & Zoom (plus controller thumbsticks)
   updateManipulation(delta) {
     const session = this.renderer.xr.getSession();
 
-    // 1. Check Thumbsticks on Quest 3 Touch Plus Controllers
+    // 1. Controller Thumbsticks (Touch Plus)
     if (session && session.inputSources) {
       for (const source of session.inputSources) {
         if (source.gamepad && source.gamepad.axes && source.gamepad.axes.length >= 4) {
-          // Right controller thumbstick: rotate and scale
           if (source.handedness === 'right') {
-            const axisX = source.gamepad.axes[2]; // Horizontal: Rotate
-            const axisY = source.gamepad.axes[3]; // Vertical: Scale Up / Down
+            const axisX = source.gamepad.axes[2]; // Rotate
+            const axisY = source.gamepad.axes[3]; // Zoom / Scale
 
             if (Math.abs(axisX) > 0.18) {
               this.dioramaRoot.rotation.y += axisX * delta * 2.4;
@@ -684,46 +1035,91 @@ export class XRManager {
       }
     }
 
-    // 2. Two-Handed Manipulation (Grip or Hand Tracking Pinch on both hands)
-    const bothActive = (this.isGrippingRight && this.isGrippingLeft) || (this.isPinchingRight && this.isPinchingLeft);
+    // 2. Middle Finger Pinch Rotation & Zoom (Hand Tracking)
+    const cam = this.renderer.xr.getCamera();
+    const camRight = new THREE.Vector3(1, 0, 0).applyQuaternion(cam.quaternion);
+    camRight.y = 0;
+    camRight.normalize();
 
-    if (bothActive) {
-      const posR = this.getRightHandWorldPosition();
-      const posL = this.getLeftHandWorldPosition();
+    if (this.isMiddlePinchingRight && this.isMiddlePinchingLeft) {
+      // Two-handed middle pinch: distance zooms, angle rotates!
+      const pR = this.getPinchPoint(0, 'middle');
+      const pL = this.getPinchPoint(1, 'middle');
 
-      // Scale Up / Down by hand distance
-      const curDist = posR.distanceTo(posL);
-      if (this.initialHandsDistance > 0.04) {
-        const factor = curDist / this.initialHandsDistance;
-        const newScale = THREE.MathUtils.clamp(this.initialDioramaScale * factor, 0.015, 0.35);
+      // Zoom (Scale) by hand distance
+      const curDist = pR.distanceTo(pL);
+      if (this.middlePinchInitialHandsDist > 0.04) {
+        const factor = curDist / this.middlePinchInitialHandsDist;
+        const newScale = THREE.MathUtils.clamp(this.middlePinchInitialDioramaScale * factor, 0.015, 0.35);
         this.dioramaRoot.scale.setScalar(newScale);
       }
 
       // Rotate around Y by angle between hands
-      const dx = posR.x - posL.x;
-      const dz = posR.z - posL.z;
+      const dx = pR.x - pL.x;
+      const dz = pR.z - pL.z;
       const curAngle = Math.atan2(dx, dz);
-      const angleDiff = curAngle - this.initialHandsAngle;
-      this.dioramaRoot.rotation.y = this.initialDioramaRotY + angleDiff;
+      const angleDiff = curAngle - this.middlePinchInitialHandsAngle;
+      this.dioramaRoot.rotation.y = this.middlePinchInitialDioramaRotY + angleDiff;
 
-      // Translate by hand midpoint
-      const curMidpoint = posR.clone().add(posL).multiplyScalar(0.5);
-      const deltaMid = curMidpoint.sub(this.initialHandsMidpoint);
-      this.dioramaRoot.position.copy(this.initialDioramaPos).add(deltaMid);
+    } else if (this.isMiddlePinchingRight) {
+      // Single hand (Right) Middle Finger Pinch:
+      // Horizontal motion relative to player view -> Rotate terrain
+      // Vertical motion -> Zoom (scale) terrain
+      const curPos = this.getPinchPoint(0, 'middle');
+      const deltaWorld = curPos.clone().sub(this.middlePinchStartPosRight);
+      const dx = deltaWorld.dot(camRight);
+      const dy = deltaWorld.y;
 
-    } else if (this.isGrippingRight || (this.isPinchingRight && !this.reticle.visible)) {
-      // Single hand move
-      const posR = this.getRightHandWorldPosition();
-      const delta = posR.clone().sub(this.singleGripInitialHandPos);
-      this.dioramaRoot.position.copy(this.singleGripInitialDioramaPos).add(delta);
-    } else if (this.isGrippingLeft || this.isPinchingLeft) {
-      const posL = this.getLeftHandWorldPosition();
-      const delta = posL.clone().sub(this.singleGripInitialHandPos);
+      // Turntable rotation
+      this.dioramaRoot.rotation.y = this.middlePinchInitialDioramaRotY + dx * 4.5;
+
+      // Zoom / Scale Up and Down
+      const scaleFactor = 1.0 + dy * 3.0;
+      const newScale = THREE.MathUtils.clamp(this.middlePinchInitialDioramaScale * scaleFactor, 0.015, 0.35);
+      this.dioramaRoot.scale.setScalar(newScale);
+
+    } else if (this.isMiddlePinchingLeft) {
+      // Single hand (Left) Middle Finger Pinch
+      const curPos = this.getPinchPoint(1, 'middle');
+      const deltaWorld = curPos.clone().sub(this.middlePinchStartPosLeft);
+      const dx = deltaWorld.dot(camRight);
+      const dy = deltaWorld.y;
+
+      this.dioramaRoot.rotation.y = this.middlePinchInitialDioramaRotY + dx * 4.5;
+
+      const scaleFactor = 1.0 + dy * 3.0;
+      const newScale = THREE.MathUtils.clamp(this.middlePinchInitialDioramaScale * scaleFactor, 0.015, 0.35);
+      this.dioramaRoot.scale.setScalar(newScale);
+
+    } else if (this.isGrippingRight || this.isGrippingLeft) {
+      // Single controller grip move
+      const ctrlPos = this.isGrippingRight ? this.getRightHandWorldPosition() : this.getLeftHandWorldPosition();
+      const delta = ctrlPos.clone().sub(this.singleGripInitialHandPos);
       this.dioramaRoot.position.copy(this.singleGripInitialDioramaPos).add(delta);
     }
   }
 
-  // Pointer & Hand Helpers
+  // Pointer & Hand Position Helpers
+  getPinchPoint(handIndex, finger = 'middle') {
+    const hand = handIndex === 0 ? this.handRight : this.handLeft;
+    const ctrl = handIndex === 0 ? this.controllerRight : this.controllerLeft;
+
+    if (hand && hand.joints) {
+      const tip = hand.joints[`${finger}-finger-tip`];
+      const thumb = hand.joints['thumb-tip'];
+      if (tip && thumb && tip.visible && thumb.visible) {
+        const p1 = new THREE.Vector3();
+        const p2 = new THREE.Vector3();
+        tip.getWorldPosition(p1);
+        thumb.getWorldPosition(p2);
+        return p1.lerp(p2, 0.5);
+      }
+    }
+    const pos = new THREE.Vector3();
+    ctrl.getWorldPosition(pos);
+    return pos;
+  }
+
   getRightPointerOrigin() {
     if (this.handRight && this.handRight.joints && this.handRight.joints['index-finger-tip'] && this.handRight.joints['index-finger-tip'].visible) {
       const pos = new THREE.Vector3();
@@ -806,13 +1202,13 @@ export class XRManager {
   update(delta = 0.016) {
     if (!this.isXRPresenting) return;
 
-    // 1. Detect Hand Tracking (Joints & Pinches)
+    // 1. Detect Hand Tracking (Joints, Index Pinch, Middle Pinch, Forward Render)
     this.updateHandTracking(delta);
 
     // 2. Detect Left Palm Facing to Show / Hide 3D Menu
     this.updatePalmFacingMenu(delta);
 
-    // 3. Handle Terrain Rotation, Scaling Up/Down, and Movement
+    // 3. Middle Finger Pinch for Rotation & Zoom / Scaling
     this.updateManipulation(delta);
 
     // 4. Raycast against Left Palm Menu
