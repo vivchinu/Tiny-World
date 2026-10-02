@@ -1420,13 +1420,16 @@ export class XRManager {
         const referenceSpace = this.renderer.xr.getReferenceSpace();
         const hitPose = hit.getPose(referenceSpace);
         if (hitPose) {
-          this.surfaceReticle.visible = true;
           this.surfaceReticle.position.set(
             hitPose.transform.position.x,
             hitPose.transform.position.y,
             hitPose.transform.position.z
           );
           this.lastHitTestResult = hit;
+
+          // Option 1: Only show blue reticle on the floor while actively moving / positioning the island
+          const isMovingIsland = (!this.isAnchorLocked && (this.isMiddlePinchingRight || this.isMiddlePinchingLeft || this.isGrippingRight || this.isGrippingLeft));
+          this.surfaceReticle.visible = isMovingIsland;
         }
       } else {
         if (this.surfaceReticle) this.surfaceReticle.visible = false;
