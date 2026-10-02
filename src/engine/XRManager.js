@@ -1,4 +1,5 @@
 import * as THREE from 'three';
+import { Radial3DMenu } from './Radial3DMenu.js';
 
 // ---------------------------------------------------------------------------
 // Forward-Render Hand Skeleton & Visual Highlight Helper
@@ -435,8 +436,12 @@ export class XRManager {
     // Anchor Gizmo & Beam (Move island with one-hand middle pinch)
     this.anchorGizmo = null;
     this.anchorGem = null;
+    this.anchorGemMat = null;
     this.anchorRingMat = null;
     this.anchorBeam = null;
+    this.isAnchorLocked = true; // True = locked to physical surface / space; False = free float
+    this.lastGemTapTime = 0;
+    this.anchorLockedToastShown = false;
 
     // AR Foundation / WebXR Hit-Test for Real-World Surface Anchoring
     this.surfaceReticle = null;
@@ -451,12 +456,8 @@ export class XRManager {
     this.dragStartLocal = new THREE.Vector3();
     this.dragCurrentLocal = new THREE.Vector3();
 
-    // 3D VR Left Palm Menu
-    this.paletteGroup = null;
-    this.paletteButtons = [];
-    this.hoveredButton = null;
-    this.isPaletteFacing = false;
-    this.paletteScaleLerp = 0.001;
+    // Modern 3D Radial Palm Menu
+    this.radialMenu = null;
 
     // Pinches state (Separate Index from Middle finger)
     this.isIndexPinchingRight = false;
@@ -621,6 +622,11 @@ export class XRManager {
     if (this.anchorBeam) this.anchorBeam.visible = false;
     if (this.surfaceReticle) this.surfaceReticle.visible = false;
 
+    if (this.radialMenu && this.radialMenu.group) {
+      this.radialMenu.group.visible = false;
+      this.radialMenu.openProgress = 0;
+    }
+
     if (this.hitTestSource) {
       try { this.hitTestSource.cancel(); } catch (e) {}
       this.hitTestSource = null;
@@ -706,8 +712,8 @@ export class XRManager {
     this.visualizerRight = new HandVisualizer(this.scene, 'right');
     this.visualizerLeft = new HandVisualizer(this.scene, 'left');
 
-    // 5. Left Hand-Facing Floating Palm Menu
-    this.createWristPalette();
+    // 5. Modern 3D Radial Palm Menu (3D Depth, Direct Touch Poke, Center Preview)
+    this.radialMenu = new Radial3DMenu(this);
 
     // 6. Tabletop Manipulation Feedback Indicator Ring (Active during Middle Pinch)
     const gizmoGeo = new THREE.RingGeometry(1.02, 1.07, 48);
@@ -732,123 +738,50 @@ export class XRManager {
     this.createSurfaceReticle();
   }
 
-  createWristPalette() {
-    this.paletteGroup = new THREE.Group();
-    this.paletteGroup.visible = false;
-    this.paletteGroup.scale.setScalar(0.001);
-    this.paletteGroup.renderOrder = 9999;
+  // Toggle AR Foundation Anchor ON / OFF
+  toggleAnchor(forceState = null) {
+    if (forceState !== null) {
+      this.isAnchorLocked = forceState;
+    } else {
+      this.isAnchorLocked = !this.isAnchorLocked;
+    }
 
-    // Frosted glass backing plate
-    const panelGeo = new THREE.BoxGeometry(0.25, 0.23, 0.012);
-    const panelMat = new THREE.MeshStandardMaterial({
-      color: 0x111827,
-      roughness: 0.35,
-      metalness: 0.2,
-      transparent: true,
-      opacity: 0.92,
-      depthTest: false
-    });
-    const panel = new THREE.Mesh(panelGeo, panelMat);
-    panel.renderOrder = 9999;
-    this.paletteGroup.add(panel);
+    if (this.isAnchorLocked) {
+      // Pin island in place / onto physical AR surface
+      if (this.sessionMode === 'immersive-ar' && this.lastHitTestResult && this.lastHitTestResult.createAnchor) {
+        this.lastHitTestResult.createAnchor().then((anchor) => {
+          this.currentXRAnchor = anchor;
+        }).catch(() => {});
+      }
 
-    // Border glow rim
-    const borderGeo = new THREE.BoxGeometry(0.256, 0.236, 0.008);
-    const borderMat = new THREE.MeshBasicMaterial({ color: 0xf6ad55, transparent: true, opacity: 0.45, depthTest: false });
-    const border = new THREE.Mesh(borderGeo, borderMat);
-    border.position.z = -0.003;
-    border.renderOrder = 9999;
-    this.paletteGroup.add(border);
+      if (this.anchorRingMat) this.anchorRingMat.color.setHex(0x10b981);
+      if (this.anchorGemMat) {
+        this.anchorGemMat.color.setHex(0x10b981);
+        this.anchorGemMat.emissive.setHex(0x059669);
+      }
+      this.pulseHaptic(this.controllerRight, 0.8, 60);
+      this.app.audio.playWallClick();
+      this.app.ui.showToast('Anchor: LOCKED ⚓ (Island pinned to surface)');
+    } else {
+      // Release anchor for free 3D floating & movement
+      if (this.currentXRAnchor) {
+        try { this.currentXRAnchor.delete(); } catch (e) {}
+        this.currentXRAnchor = null;
+      }
 
-    // Menu Title
-    const titleCanvas = document.createElement('canvas');
-    titleCanvas.width = 256;
-    titleCanvas.height = 64;
-    const tCtx = titleCanvas.getContext('2d');
-    tCtx.fillStyle = '#fed7aa';
-    tCtx.font = 'bold 30px sans-serif';
-    tCtx.textAlign = 'center';
-    tCtx.fillText('🌱 Tiny World', 128, 42);
+      if (this.anchorRingMat) this.anchorRingMat.color.setHex(0x38bdf8);
+      if (this.anchorGemMat) {
+        this.anchorGemMat.color.setHex(0x38bdf8);
+        this.anchorGemMat.emissive.setHex(0x0284c7);
+      }
+      this.pulseHaptic(this.controllerRight, 0.6, 40);
+      this.app.audio.playPop();
+      this.app.ui.showToast('Anchor: UNLOCKED 🔓 (Pinch 1-hand middle finger to move)');
+    }
 
-    const titleTex = new THREE.CanvasTexture(titleCanvas);
-    const titleMat = new THREE.MeshBasicMaterial({ map: titleTex, transparent: true, depthTest: false });
-    const titlePlane = new THREE.Mesh(new THREE.PlaneGeometry(0.18, 0.042), titleMat);
-    titlePlane.position.set(0, 0.092, 0.01);
-    titlePlane.renderOrder = 10000;
-    this.paletteGroup.add(titlePlane);
-
-    // Palette Buttons layout (3 columns x 4 rows)
-    const buttons = [
-      // Row 1: Building Basics
-      { id: 'house', label: '🏠', name: 'House' },
-      { id: 'wall', label: '🧱', name: 'Wall' },
-      { id: 'path', label: '🛤️', name: 'Path' },
-
-      // Row 2: Nature & Details
-      { id: 'tree', label: '🌳', name: 'Tree' },
-      { id: 'pond', label: '💧', name: 'Pond' },
-      { id: 'prop', label: '🏮', name: 'Props' },
-
-      // Row 3: Actions & Environment
-      { id: 'demolish', label: '🔨', name: 'Clear' },
-      { id: 'time', label: '☀️', name: 'Time' },
-      { id: 'undo', label: '↩️', name: 'Undo' },
-
-      // Row 4: Rotate & Scale Island
-      { id: 'rotate-left', label: '↺', name: 'Rotate 45°' },
-      { id: 'scale-up', label: '➕', name: 'Scale +' },
-      { id: 'scale-down', label: '➖', name: 'Scale -' }
-    ];
-
-    const cols = 3;
-    const btnSize = 0.044;
-    const gapX = 0.058;
-    const gapY = 0.048;
-    const startY = 0.046;
-
-    buttons.forEach((t, i) => {
-      const col = i % cols;
-      const row = Math.floor(i / cols);
-
-      const bx = (col - 1) * gapX;
-      const by = startY - row * gapY;
-
-      const btnGeo = new THREE.BoxGeometry(btnSize, btnSize, 0.016);
-      const isControl = (t.id.startsWith('rotate') || t.id.startsWith('scale'));
-      const btnMat = new THREE.MeshStandardMaterial({
-        color: isControl ? 0x1e293b : 0x334155,
-        roughness: 0.4,
-        metalness: 0.1,
-        depthTest: false
-      });
-      const btn = new THREE.Mesh(btnGeo, btnMat);
-      btn.position.set(bx, by, 0.01);
-      btn.renderOrder = 10000;
-      btn.userData = { toolId: t.id, toolName: t.name };
-
-      // Button Icon Texture
-      const canvas = document.createElement('canvas');
-      canvas.width = 128;
-      canvas.height = 128;
-      const ctx = canvas.getContext('2d');
-      ctx.fillStyle = '#ffffff';
-      ctx.font = '68px sans-serif';
-      ctx.textAlign = 'center';
-      ctx.textBaseline = 'middle';
-      ctx.fillText(t.label, 64, 64);
-
-      const iconTex = new THREE.CanvasTexture(canvas);
-      const iconMat = new THREE.MeshBasicMaterial({ map: iconTex, transparent: true, depthTest: false });
-      const iconPlane = new THREE.Mesh(new THREE.PlaneGeometry(btnSize * 0.85, btnSize * 0.85), iconMat);
-      iconPlane.position.z = 0.009;
-      iconPlane.renderOrder = 10001;
-      btn.add(iconPlane);
-
-      this.paletteGroup.add(btn);
-      this.paletteButtons.push(btn);
-    });
-
-    this.scene.add(this.paletteGroup);
+    if (this.radialMenu) {
+      this.radialMenu.updateAnchorVisuals(this.isAnchorLocked);
+    }
   }
 
   createAnchorGizmo() {
@@ -865,10 +798,10 @@ export class XRManager {
     const baseMesh = new THREE.Mesh(baseGeo, baseMat);
     this.anchorGizmo.add(baseMesh);
 
-    // 2. Glowing inner anchor ring
+    // 2. Glowing inner anchor ring (Emerald green when locked, Sky blue when unlocked)
     const ringGeo = new THREE.TorusGeometry(0.40, 0.022, 12, 32);
     this.anchorRingMat = new THREE.MeshBasicMaterial({
-      color: 0x34d399,
+      color: 0x10b981,
       transparent: true,
       opacity: 0.85
     });
@@ -876,10 +809,10 @@ export class XRManager {
     ringMesh.rotation.x = Math.PI / 2;
     this.anchorGizmo.add(ringMesh);
 
-    // 3. Central Anchor Crystal Gem
+    // 3. Central Anchor Crystal Gem (Interactive: Poke to toggle anchor!)
     const gemGeo = new THREE.OctahedronGeometry(0.14, 0);
     this.anchorGemMat = new THREE.MeshStandardMaterial({
-      color: 0x34d399,
+      color: 0x10b981,
       emissive: 0x059669,
       emissiveIntensity: 0.6,
       roughness: 0.1,
@@ -889,6 +822,7 @@ export class XRManager {
     });
     this.anchorGem = new THREE.Mesh(gemGeo, this.anchorGemMat);
     this.anchorGem.position.y = 0.18;
+    this.anchorGem.userData = { isAnchorGem: true };
     this.anchorGizmo.add(this.anchorGem);
 
     // 4. Directional compass arms
@@ -959,11 +893,9 @@ export class XRManager {
   onActionStart() {
     this.pulseHaptic(this.controllerRight, 0.4, 25);
 
-    // 1. Check if clicking on the Left Palm Menu
-    if (this.paletteGroup.visible && this.hoveredButton) {
-      const tid = this.hoveredButton.userData.toolId;
-      this.handlePaletteClick(tid);
-      this.pulseHaptic(this.controllerRight, 0.8, 50);
+    // 1. Check if Radial Menu is open and hovering a button (Raycast Pinch Mode)
+    if (this.radialMenu && this.radialMenu.isOpen && this.radialMenu.hoveredButton) {
+      this.radialMenu.triggerButton(this.radialMenu.hoveredButton.userData.def.id);
       return;
     }
 
@@ -1069,10 +1001,13 @@ export class XRManager {
       const pL = this.getPinchPoint(1, 'middle');
       this.middlePinchInitialHandsDist = pR.distanceTo(pL);
       this.middlePinchInitialHandsAngle = Math.atan2(pR.x - pL.x, pR.z - pL.z);
+    } else if (this.isAnchorLocked) {
+      // 1-Hand middle pinch when island is locked
+      this.app.ui.showToast('Island Anchored ⚓ (Toggle Anchor in menu or tap gem to move)');
     }
 
     if (this.manipGizmo) this.manipGizmo.visible = true;
-    if (this.anchorBeam) this.anchorBeam.visible = true;
+    if (this.anchorBeam && !this.isAnchorLocked) this.anchorBeam.visible = true;
     if (this.anchorRingMat) this.anchorRingMat.color.setHex(0x38bdf8);
 
     this.app.audio.playPop();
@@ -1085,45 +1020,14 @@ export class XRManager {
     if (!this.isMiddlePinchingRight && !this.isMiddlePinchingLeft) {
       if (this.manipGizmo) this.manipGizmo.visible = false;
       if (this.anchorBeam) this.anchorBeam.visible = false;
-      if (this.anchorRingMat) this.anchorRingMat.color.setHex(0x34d399);
 
-      // If anchored onto an AR surface, create an XRAnchor if supported
-      if (this.sessionMode === 'immersive-ar' && this.lastHitTestResult && this.lastHitTestResult.createAnchor) {
-        this.lastHitTestResult.createAnchor().then((anchor) => {
-          this.currentXRAnchor = anchor;
-        }).catch(() => {});
+      // If island was moved while unlocked, lock it on release
+      if (!this.isAnchorLocked) {
+        this.toggleAnchor(true);
+      } else {
+        if (this.anchorRingMat) this.anchorRingMat.color.setHex(0x10b981);
+        this.app.audio.playPop();
       }
-
-      this.app.audio.playPop();
-      this.app.ui.showToast('Island Anchored ⚓');
-    }
-  }
-
-  handlePaletteClick(toolId) {
-    if (toolId === 'undo') {
-      this.app.world.undo();
-      this.app.ui.showToast('Undone action');
-    } else if (toolId === 'time') {
-      const times = [6.5, 12.0, 18.0, 22.5];
-      const cur = this.sm.timeOfDay;
-      const nextTime = times[(times.indexOf(cur) + 1) % times.length] || 12.0;
-      this.sm.setTimeOfDay(nextTime);
-      this.app.ui.showToast('Time changed');
-    } else if (toolId === 'rotate-left') {
-      this.rotateIsland(-Math.PI / 4);
-      this.app.ui.showToast('Rotated 45° ↺');
-    } else if (toolId === 'rotate-right') {
-      this.rotateIsland(Math.PI / 4);
-      this.app.ui.showToast('Rotated 45° ↻');
-    } else if (toolId === 'scale-up') {
-      this.scaleIsland(1.25);
-      this.app.ui.showToast('Scaled Up ➕');
-    } else if (toolId === 'scale-down') {
-      this.scaleIsland(0.8);
-      this.app.ui.showToast('Scaled Down ➖');
-    } else {
-      this.app.ui.selectTool(toolId);
-      this.app.ui.showToast(`Selected ${toolId.toUpperCase()}`);
     }
   }
 
@@ -1286,56 +1190,6 @@ export class XRManager {
     }
   }
 
-  // Detect if Left Palm is facing user's eyes & smoothly animate palette
-  updatePalmFacingMenu(delta) {
-    if (!this.paletteGroup) return;
-
-    // Get Head / Camera position
-    const cam = this.renderer.xr.getCamera();
-    const headPos = new THREE.Vector3();
-    cam.getWorldPosition(headPos);
-
-    // Get Left Hand / Wrist position and orientation
-    let leftPos = new THREE.Vector3();
-    let leftQuat = new THREE.Quaternion();
-
-    if (this.handLeft && this.handLeft.joints && this.handLeft.joints['wrist'] && this.handLeft.joints['wrist'].visible) {
-      this.handLeft.joints['wrist'].getWorldPosition(leftPos);
-      this.handLeft.joints['wrist'].getWorldQuaternion(leftQuat);
-    } else {
-      this.controllerLeft.getWorldPosition(leftPos);
-      this.controllerLeft.getWorldQuaternion(leftQuat);
-    }
-
-    // Vector from left hand to eyes
-    const toHead = headPos.clone().sub(leftPos).normalize();
-
-    // Palm normal vector: points outwards from palm face
-    const palmNormalLocal = new THREE.Vector3(0.2, 0.85, -0.3).normalize();
-    const palmNormalWorld = palmNormalLocal.clone().applyQuaternion(leftQuat);
-
-    // Dot product: > 0.25 means the palm is tilted towards the user's face!
-    const facingDot = palmNormalWorld.dot(toHead);
-    this.isPaletteFacing = facingDot > 0.25 && leftPos.distanceTo(headPos) < 0.85;
-
-    // Target scale: 0.85 when facing, 0.001 when facing away
-    const targetScale = this.isPaletteFacing ? 0.85 : 0.001;
-    this.paletteScaleLerp = THREE.MathUtils.lerp(this.paletteScaleLerp, targetScale, delta * 12.0);
-
-    if (this.paletteScaleLerp > 0.05) {
-      this.paletteGroup.visible = true;
-      this.paletteGroup.scale.setScalar(this.paletteScaleLerp);
-
-      // Position palette gracefully 8cm above the palm facing the player's eyes
-      const offset = new THREE.Vector3(0.02, 0.08, 0.02).applyQuaternion(leftQuat);
-      this.paletteGroup.position.copy(leftPos).add(offset);
-      this.paletteGroup.lookAt(headPos);
-    } else {
-      this.paletteGroup.visible = false;
-      this.paletteGroup.scale.setScalar(0.001);
-    }
-  }
-
   // Middle Finger Pinch Rotation & Zoom (plus controller thumbsticks)
   updateManipulation(delta) {
     const session = this.renderer.xr.getSession();
@@ -1386,6 +1240,17 @@ export class XRManager {
       if (this.anchorBeam) this.anchorBeam.visible = false;
 
     } else if (this.isMiddlePinchingRight || this.isMiddlePinchingLeft) {
+      // If Anchor is LOCKED, island is pinned to its surface
+      if (this.isAnchorLocked) {
+        if (!this.anchorLockedToastShown) {
+          this.app.ui.showToast('Island Anchored ⚓ (Tap 🔓 in Radial Menu or Gem to Move)');
+          this.anchorLockedToastShown = true;
+          setTimeout(() => { this.anchorLockedToastShown = false; }, 2000);
+        }
+        if (this.anchorBeam) this.anchorBeam.visible = false;
+        return;
+      }
+
       // Single hand middle pinch (Right or Left): MOVE THE ISLAND IN 3D SPACE with your hand!
       const handIndex = this.isMiddlePinchingRight ? 0 : 1;
       const curHandPos = this.getPinchPoint(handIndex, 'middle');
@@ -1575,38 +1440,39 @@ export class XRManager {
       this.anchorGem.rotation.y += delta * 1.2;
     }
 
+    // Direct index finger poke on Central Anchor Gem to toggle anchor
+    if (this.anchorGem && this.handRight && this.handRight.joints && this.handRight.joints['index-finger-tip']) {
+      const tip = this.handRight.joints['index-finger-tip'];
+      if (tip && tip.visible) {
+        const gemWorld = new THREE.Vector3();
+        this.anchorGem.getWorldPosition(gemWorld);
+        const tipPos = new THREE.Vector3();
+        tip.getWorldPosition(tipPos);
+        if (tipPos.distanceTo(gemWorld) < 0.055 && (performance.now() - this.lastGemTapTime > 600)) {
+          this.lastGemTapTime = performance.now();
+          this.toggleAnchor();
+        }
+      }
+    }
+
     // 1. Detect Hand Tracking (Occlusion, Joints, Index Pinch, Middle Pinch, Forward Render)
     this.updateHandTracking(delta);
 
-    // 2. Detect Left Palm Facing to Show / Hide 3D Menu
-    this.updatePalmFacingMenu(delta);
+    // 2. Modern 3D Radial Palm Menu (Direct Touch Poke, Distance Raycast, Blooming)
+    if (this.radialMenu) {
+      const cam = this.renderer.xr.getCamera();
+      const headPos = new THREE.Vector3();
+      cam.getWorldPosition(headPos);
+      this.radialMenu.update(delta, headPos, this.handLeft, this.handRight, this.controllerRight, this.isIndexPinchingRight);
+    }
 
     // 3. Middle Finger Pinch for 3D Movement / Anchor & Zoom / Scaling
     this.updateManipulation(delta);
 
-    // 4. Raycast against Left Palm Menu
-    const origin = this.getRightPointerOrigin();
-    const dir = this.getRightPointerDirection();
-    this.raycaster.set(origin, dir);
-
-    if (this.paletteGroup.visible) {
-      const paletteHits = this.raycaster.intersectObjects(this.paletteButtons, false);
-      if (paletteHits.length > 0) {
-        const hitBtn = paletteHits[0].object;
-        if (this.hoveredButton !== hitBtn) {
-          if (this.hoveredButton) this.hoveredButton.material.color.setHex(0x334155);
-          this.hoveredButton = hitBtn;
-          hitBtn.material.color.setHex(0xf6ad55); // Highlight
-          this.pulseHaptic(this.controllerRight, 0.25, 20);
-        }
-        this.reticle.visible = false;
-        return;
-      } else {
-        if (this.hoveredButton) {
-          this.hoveredButton.material.color.setHex(0x334155);
-          this.hoveredButton = null;
-        }
-      }
+    // 4. If Radial Menu is open and hovering a button, suppress terrain reticle
+    if (this.radialMenu && this.radialMenu.isOpen && this.radialMenu.hoveredButton) {
+      this.reticle.visible = false;
+      return;
     }
 
     // 5. Raycast against Island Ground
