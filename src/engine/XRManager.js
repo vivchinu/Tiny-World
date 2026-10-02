@@ -11,6 +11,143 @@ const _vUp = new THREE.Vector3(0, 1, 0);
 const _tempQuat = new THREE.Quaternion();
 const _tempPos = new THREE.Vector3();
 
+// ---------------------------------------------------------------------------
+// Hand Occlusion Depth-Mask
+// Writes to depth buffer with colorWrite=false, depthWrite=true, renderOrder=-1
+// Prevents virtual 3D models from rendering over real hands in Passthrough / VR
+// ---------------------------------------------------------------------------
+class HandOccluder {
+  constructor(scene, handedness = 'right') {
+    this.scene = scene;
+    this.handedness = handedness;
+    this.group = new THREE.Group();
+    this.group.renderOrder = -1; // Renders BEFORE all scene objects (default renderOrder 0)
+    this.scene.add(this.group);
+
+    // Occlusion material: invisible to color, writes to Z-buffer
+    this.mat = new THREE.MeshBasicMaterial({
+      colorWrite: false,
+      depthWrite: true,
+      depthTest: true
+    });
+
+    this.jointMeshes = {};
+    this.boneCylinders = [];
+
+    // Anatomical radii for hand joints
+    this.jointRadii = {
+      'wrist': 0.024,
+      'thumb-metacarpal': 0.016, 'thumb-phalanx-proximal': 0.014, 'thumb-phalanx-distal': 0.013, 'thumb-tip': 0.012,
+      'index-finger-metacarpal': 0.015, 'index-finger-phalanx-proximal': 0.013, 'index-finger-phalanx-intermediate': 0.012, 'index-finger-phalanx-distal': 0.011, 'index-finger-tip': 0.010,
+      'middle-finger-metacarpal': 0.015, 'middle-finger-phalanx-proximal': 0.013, 'middle-finger-phalanx-intermediate': 0.012, 'middle-finger-phalanx-distal': 0.011, 'middle-finger-tip': 0.010,
+      'ring-finger-metacarpal': 0.014, 'ring-finger-phalanx-proximal': 0.012, 'ring-finger-phalanx-intermediate': 0.011, 'ring-finger-phalanx-distal': 0.010, 'ring-finger-tip': 0.009,
+      'pinky-finger-metacarpal': 0.013, 'pinky-finger-phalanx-proximal': 0.011, 'pinky-finger-phalanx-intermediate': 0.010, 'pinky-finger-phalanx-distal': 0.009, 'pinky-finger-tip': 0.0085
+    };
+
+    for (const [name, radius] of Object.entries(this.jointRadii)) {
+      const geo = new THREE.SphereGeometry(radius, 10, 8);
+      const mesh = new THREE.Mesh(geo, this.mat);
+      mesh.renderOrder = -1;
+      mesh.visible = false;
+      this.group.add(mesh);
+      this.jointMeshes[name] = mesh;
+    }
+
+    this.chains = [
+      ['wrist', 'thumb-metacarpal', 'thumb-phalanx-proximal', 'thumb-phalanx-distal', 'thumb-tip'],
+      ['wrist', 'index-finger-metacarpal', 'index-finger-phalanx-proximal', 'index-finger-phalanx-intermediate', 'index-finger-phalanx-distal', 'index-finger-tip'],
+      ['wrist', 'middle-finger-metacarpal', 'middle-finger-phalanx-proximal', 'middle-finger-phalanx-intermediate', 'middle-finger-phalanx-distal', 'middle-finger-tip'],
+      ['wrist', 'ring-finger-metacarpal', 'ring-finger-phalanx-proximal', 'ring-finger-phalanx-intermediate', 'ring-finger-phalanx-distal', 'ring-finger-tip'],
+      ['wrist', 'pinky-finger-metacarpal', 'pinky-finger-phalanx-proximal', 'pinky-finger-phalanx-intermediate', 'pinky-finger-phalanx-distal', 'pinky-finger-tip']
+    ];
+
+    const cylGeo = new THREE.CylinderGeometry(0.010, 0.011, 1, 8);
+    this.chains.forEach((chain) => {
+      for (let i = 0; i < chain.length - 1; i++) {
+        const cyl = new THREE.Mesh(cylGeo, this.mat);
+        cyl.renderOrder = -1;
+        cyl.visible = false;
+        cyl.userData = { from: chain[i], to: chain[i + 1] };
+        this.group.add(cyl);
+        this.boneCylinders.push(cyl);
+      }
+    });
+
+    // Palm core volume
+    const palmGeo = new THREE.BoxGeometry(0.068, 0.024, 0.065);
+    this.palmMesh = new THREE.Mesh(palmGeo, this.mat);
+    this.palmMesh.renderOrder = -1;
+    this.palmMesh.visible = false;
+    this.group.add(this.palmMesh);
+  }
+
+  update(hand) {
+    if (!hand || !hand.joints) {
+      this.group.visible = false;
+      return;
+    }
+    const wrist = hand.joints['wrist'];
+    if (!wrist || !wrist.visible) {
+      this.group.visible = false;
+      return;
+    }
+    this.group.visible = true;
+
+    // Update joint spheres
+    for (const [name, mesh] of Object.entries(this.jointMeshes)) {
+      const joint = hand.joints[name];
+      if (joint && joint.visible) {
+        joint.getWorldPosition(_tempPos);
+        mesh.position.copy(_tempPos);
+        mesh.visible = true;
+      } else {
+        mesh.visible = false;
+      }
+    }
+
+    // Update bone cylinders
+    for (let i = 0; i < this.boneCylinders.length; i++) {
+      const cyl = this.boneCylinders[i];
+      const jFrom = hand.joints[cyl.userData.from];
+      const jTo = hand.joints[cyl.userData.to];
+      if (jFrom && jTo && jFrom.visible && jTo.visible) {
+        jFrom.getWorldPosition(_v1);
+        jTo.getWorldPosition(_v2);
+        const dist = _v1.distanceTo(_v2);
+        if (dist > 0.002) {
+          cyl.position.copy(_v1).lerp(_v2, 0.5);
+          _vDir.copy(_v2).sub(_v1).normalize();
+          _tempQuat.setFromUnitVectors(_vUp, _vDir);
+          cyl.quaternion.copy(_tempQuat);
+          cyl.scale.set(1, dist, 1);
+          cyl.visible = true;
+        } else {
+          cyl.visible = false;
+        }
+      } else {
+        cyl.visible = false;
+      }
+    }
+
+    // Update palm mesh
+    const jMidMeta = hand.joints['middle-finger-metacarpal'];
+    if (wrist && jMidMeta && wrist.visible && jMidMeta.visible) {
+      wrist.getWorldPosition(_v1);
+      jMidMeta.getWorldPosition(_v2);
+      this.palmMesh.position.copy(_v1).lerp(_v2, 0.5);
+      wrist.getWorldQuaternion(_tempQuat);
+      this.palmMesh.quaternion.copy(_tempQuat);
+      this.palmMesh.visible = true;
+    } else {
+      this.palmMesh.visible = false;
+    }
+  }
+
+  setVisible(visible) {
+    this.group.visible = visible;
+  }
+}
+
 class HandVisualizer {
   constructor(scene, handedness = 'right') {
     this.scene = scene;
@@ -287,11 +424,25 @@ export class XRManager {
     this.controllerRight = null;
     this.controllerLeft = null;
     this.handRight = null;
-    this.handLeft = null;
+    // Hand Occlusion Depth Masks (Prevents virtual models from clipping real hands)
+    this.occluderRight = null;
+    this.occluderLeft = null;
 
     // Forward-Render Hand Visualizers
     this.visualizerRight = null;
     this.visualizerLeft = null;
+
+    // Anchor Gizmo & Beam (Move island with one-hand middle pinch)
+    this.anchorGizmo = null;
+    this.anchorGem = null;
+    this.anchorRingMat = null;
+    this.anchorBeam = null;
+
+    // AR Foundation / WebXR Hit-Test for Real-World Surface Anchoring
+    this.surfaceReticle = null;
+    this.hitTestSource = null;
+    this.currentXRAnchor = null;
+    this.lastHitTestResult = null;
 
     // Raycast & Reticle
     this.raycaster = new THREE.Raycaster();
@@ -311,14 +462,16 @@ export class XRManager {
     this.isIndexPinchingRight = false;
     this.isIndexPinchingLeft = false;
 
-    // Middle Finger Pinch (Dedicated Rotate & Zoom)
+    // Middle Finger Pinch (Move Island with 1 hand, Scale/Rotate with 2 hands)
     this.isMiddlePinchingRight = false;
     this.isMiddlePinchingLeft = false;
 
     this.middlePinchStartPosRight = new THREE.Vector3();
     this.middlePinchStartPosLeft = new THREE.Vector3();
+    this.middlePinchInitialDioramaPos = new THREE.Vector3();
     this.middlePinchInitialDioramaRotY = 0;
     this.middlePinchInitialDioramaScale = 0.07;
+    this.middlePinchInitialHandYaw = 0;
     this.middlePinchInitialHandsDist = 0;
     this.middlePinchInitialHandsAngle = 0;
 
@@ -387,7 +540,7 @@ export class XRManager {
 
     try {
       const sessionInit = {
-        optionalFeatures: ['local-floor', 'bounded-floor', 'hand-tracking', 'layers']
+        optionalFeatures: ['local-floor', 'bounded-floor', 'hand-tracking', 'hit-test', 'anchors', 'layers']
       };
 
       const session = await navigator.xr.requestSession(mode, sessionInit);
@@ -417,12 +570,30 @@ export class XRManager {
     // Reset tabletop position and scale (comfortable table height and distance)
     this.resetIslandView();
 
+    // Ensure near plane is 0.01m on XR eye cameras to prevent model & hand clipping
+    const xrCam = this.renderer.xr.getCamera();
+    if (xrCam) {
+      xrCam.near = 0.01;
+      if (xrCam.cameras) {
+        xrCam.cameras.forEach(c => { c.near = 0.01; });
+      }
+    }
+
+    // Set up WebXR Hit-Test for AR Foundation plane/table anchoring
+    if (mode === 'immersive-ar' && this.xrSession.requestHitTestSource) {
+      this.xrSession.requestReferenceSpace('viewer').then((viewerSpace) => {
+        this.xrSession.requestHitTestSource({ space: viewerSpace }).then((source) => {
+          this.hitTestSource = source;
+        });
+      }).catch(err => console.log('Hit-test init notice:', err));
+    }
+
     if (mode === 'immersive-ar') {
       this.scene.background = null;
       this.scene.fog = null;
-      this.app.ui.showToast('Quest 3 Passthrough: Look at left palm for menu | Middle pinch to Rotate & Zoom');
+      this.app.ui.showToast('Passthrough AR: Move island with 1-hand middle pinch | Scale with 2 hands');
     } else {
-      this.app.ui.showToast('WebXR VR: Look at left palm for menu | Middle pinch to Rotate & Zoom');
+      this.app.ui.showToast('WebXR VR: Move island with 1-hand middle pinch | Scale with 2 hands');
     }
 
     this.app.audio.playBuildChord();
@@ -442,9 +613,18 @@ export class XRManager {
     if (this.savedBackground) this.scene.background = this.savedBackground;
     if (this.savedFog) this.scene.fog = this.savedFog;
 
+    if (this.occluderRight) this.occluderRight.setVisible(false);
+    if (this.occluderLeft) this.occluderLeft.setVisible(false);
     if (this.visualizerRight) this.visualizerRight.setVisible(false);
     if (this.visualizerLeft) this.visualizerLeft.setVisible(false);
     if (this.manipGizmo) this.manipGizmo.visible = false;
+    if (this.anchorBeam) this.anchorBeam.visible = false;
+    if (this.surfaceReticle) this.surfaceReticle.visible = false;
+
+    if (this.hitTestSource) {
+      try { this.hitTestSource.cancel(); } catch (e) {}
+      this.hitTestSource = null;
+    }
 
     this.app.ui.showToast('Exited WebXR');
   }
@@ -518,14 +698,18 @@ export class XRManager {
     this.handLeft = this.renderer.xr.getHand(1);
     this.scene.add(this.handLeft);
 
-    // 3. Forward-Render Hand Skeleton Visualizers (Renders above virtual models)
+    // 3. Hand Occlusion Depth Masks (Writes depth to prevent island clipping real hands)
+    this.occluderRight = new HandOccluder(this.scene, 'right');
+    this.occluderLeft = new HandOccluder(this.scene, 'left');
+
+    // 4. Forward-Render Hand Skeleton Visualizers (Renders above virtual models)
     this.visualizerRight = new HandVisualizer(this.scene, 'right');
     this.visualizerLeft = new HandVisualizer(this.scene, 'left');
 
-    // 4. Left Hand-Facing Floating Palm Menu
+    // 5. Left Hand-Facing Floating Palm Menu
     this.createWristPalette();
 
-    // 5. Tabletop Manipulation Feedback Indicator Ring (Active during Middle Pinch)
+    // 6. Tabletop Manipulation Feedback Indicator Ring (Active during Middle Pinch)
     const gizmoGeo = new THREE.RingGeometry(1.02, 1.07, 48);
     gizmoGeo.rotateX(-Math.PI / 2);
     this.manipGizmo = new THREE.Mesh(gizmoGeo, new THREE.MeshBasicMaterial({
@@ -540,6 +724,12 @@ export class XRManager {
     this.manipGizmo.renderOrder = 9995;
     this.manipGizmo.visible = false;
     this.dioramaRoot.add(this.manipGizmo);
+
+    // 7. Island Anchor Gizmo & Beam (Allows moving island with one-hand middle pinch)
+    this.createAnchorGizmo();
+
+    // 8. AR Foundation / WebXR Hit-Test Surface Reticle
+    this.createSurfaceReticle();
   }
 
   createWristPalette() {
@@ -661,6 +851,110 @@ export class XRManager {
     this.scene.add(this.paletteGroup);
   }
 
+  createAnchorGizmo() {
+    this.anchorGizmo = new THREE.Group();
+    this.anchorGizmo.name = 'island_anchor_gizmo';
+
+    // 1. Ornate dark bronze / stone anchor base plate at bottom of floating island (-1.35m local Y)
+    const baseGeo = new THREE.CylinderGeometry(0.35, 0.45, 0.08, 24);
+    const baseMat = new THREE.MeshStandardMaterial({
+      color: 0x1e293b,
+      metalness: 0.8,
+      roughness: 0.25
+    });
+    const baseMesh = new THREE.Mesh(baseGeo, baseMat);
+    this.anchorGizmo.add(baseMesh);
+
+    // 2. Glowing inner anchor ring
+    const ringGeo = new THREE.TorusGeometry(0.40, 0.022, 12, 32);
+    this.anchorRingMat = new THREE.MeshBasicMaterial({
+      color: 0x34d399,
+      transparent: true,
+      opacity: 0.85
+    });
+    const ringMesh = new THREE.Mesh(ringGeo, this.anchorRingMat);
+    ringMesh.rotation.x = Math.PI / 2;
+    this.anchorGizmo.add(ringMesh);
+
+    // 3. Central Anchor Crystal Gem
+    const gemGeo = new THREE.OctahedronGeometry(0.14, 0);
+    this.anchorGemMat = new THREE.MeshStandardMaterial({
+      color: 0x34d399,
+      emissive: 0x059669,
+      emissiveIntensity: 0.6,
+      roughness: 0.1,
+      metalness: 0.9,
+      transparent: true,
+      opacity: 0.95
+    });
+    this.anchorGem = new THREE.Mesh(gemGeo, this.anchorGemMat);
+    this.anchorGem.position.y = 0.18;
+    this.anchorGizmo.add(this.anchorGem);
+
+    // 4. Directional compass arms
+    for (let i = 0; i < 4; i++) {
+      const armGeo = new THREE.BoxGeometry(0.04, 0.03, 0.24);
+      const armMesh = new THREE.Mesh(armGeo, baseMat);
+      armMesh.rotation.y = (i * Math.PI) / 2;
+      armMesh.position.y = 0.02;
+      this.anchorGizmo.add(armMesh);
+    }
+
+    this.anchorGizmo.position.set(0, -1.35, 0);
+    this.dioramaRoot.add(this.anchorGizmo);
+
+    // Dynamic Tether / Anchor Beam connecting hand to anchor
+    const beamGeo = new THREE.BufferGeometry().setFromPoints([
+      new THREE.Vector3(0, 0, 0),
+      new THREE.Vector3(0, 0, 0)
+    ]);
+    this.anchorBeamMat = new THREE.LineBasicMaterial({
+      color: 0x38bdf8,
+      transparent: true,
+      opacity: 0.85,
+      linewidth: 3,
+      depthTest: false
+    });
+    this.anchorBeam = new THREE.Line(beamGeo, this.anchorBeamMat);
+    this.anchorBeam.renderOrder = 9996;
+    this.anchorBeam.visible = false;
+    this.scene.add(this.anchorBeam);
+  }
+
+  createSurfaceReticle() {
+    this.surfaceReticle = new THREE.Group();
+    this.surfaceReticle.visible = false;
+    this.surfaceReticle.renderOrder = 9994;
+
+    // Outer concentric ring
+    const ringGeo = new THREE.RingGeometry(0.18, 0.22, 32);
+    ringGeo.rotateX(-Math.PI / 2);
+    const ringMat = new THREE.MeshBasicMaterial({
+      color: 0x38bdf8,
+      side: THREE.DoubleSide,
+      transparent: true,
+      opacity: 0.85,
+      depthTest: false
+    });
+    const ring = new THREE.Mesh(ringGeo, ringMat);
+    this.surfaceReticle.add(ring);
+
+    // Inner pulsing ring
+    const innerRingGeo = new THREE.RingGeometry(0.07, 0.09, 24);
+    innerRingGeo.rotateX(-Math.PI / 2);
+    const innerRing = new THREE.Mesh(innerRingGeo, ringMat);
+    this.surfaceReticle.add(innerRing);
+
+    // Center Anchor cross
+    const crossGeo1 = new THREE.BoxGeometry(0.12, 0.002, 0.016);
+    const crossGeo2 = new THREE.BoxGeometry(0.016, 0.002, 0.12);
+    const crossMat = new THREE.MeshBasicMaterial({ color: 0x38bdf8, depthTest: false });
+    this.surfaceReticle.add(new THREE.Mesh(crossGeo1, crossMat));
+    this.surfaceReticle.add(new THREE.Mesh(crossGeo2, crossMat));
+
+    this.scene.add(this.surfaceReticle);
+  }
+
   // Trigger or Index Pinch Start (Action / Draw / Build)
   onActionStart() {
     this.pulseHaptic(this.controllerRight, 0.4, 25);
@@ -745,7 +1039,7 @@ export class XRManager {
     }
   }
 
-  // Middle Finger Pinch Start (Rotate & Zoom)
+  // Middle Finger Pinch Start (1-Hand = Move Island / Anchor, 2-Hands = Holographic Zoom & Orbit)
   onMiddlePinchStart(handIndex) {
     if (handIndex === 0) {
       this.isMiddlePinchingRight = true;
@@ -755,8 +1049,20 @@ export class XRManager {
       this.middlePinchStartPosLeft.copy(this.getPinchPoint(1, 'middle'));
     }
 
+    this.middlePinchInitialDioramaPos.copy(this.dioramaRoot.position);
     this.middlePinchInitialDioramaRotY = this.dioramaRoot.rotation.y;
     this.middlePinchInitialDioramaScale = this.dioramaRoot.scale.x;
+
+    // Record initial hand yaw for wrist turning
+    const hand = handIndex === 0 ? this.handRight : this.handLeft;
+    if (hand && hand.joints && hand.joints['wrist'] && hand.joints['wrist'].visible) {
+      const euler = new THREE.Euler().setFromQuaternion(hand.joints['wrist'].quaternion, 'YXZ');
+      this.middlePinchInitialHandYaw = euler.y;
+    } else {
+      const ctrl = handIndex === 0 ? this.controllerRight : this.controllerLeft;
+      const euler = new THREE.Euler().setFromQuaternion(ctrl.quaternion, 'YXZ');
+      this.middlePinchInitialHandYaw = euler.y;
+    }
 
     if (this.isMiddlePinchingRight && this.isMiddlePinchingLeft) {
       const pR = this.getPinchPoint(0, 'middle');
@@ -766,6 +1072,9 @@ export class XRManager {
     }
 
     if (this.manipGizmo) this.manipGizmo.visible = true;
+    if (this.anchorBeam) this.anchorBeam.visible = true;
+    if (this.anchorRingMat) this.anchorRingMat.color.setHex(0x38bdf8);
+
     this.app.audio.playPop();
   }
 
@@ -775,6 +1084,18 @@ export class XRManager {
 
     if (!this.isMiddlePinchingRight && !this.isMiddlePinchingLeft) {
       if (this.manipGizmo) this.manipGizmo.visible = false;
+      if (this.anchorBeam) this.anchorBeam.visible = false;
+      if (this.anchorRingMat) this.anchorRingMat.color.setHex(0x34d399);
+
+      // If anchored onto an AR surface, create an XRAnchor if supported
+      if (this.sessionMode === 'immersive-ar' && this.lastHitTestResult && this.lastHitTestResult.createAnchor) {
+        this.lastHitTestResult.createAnchor().then((anchor) => {
+          this.currentXRAnchor = anchor;
+        }).catch(() => {});
+      }
+
+      this.app.audio.playPop();
+      this.app.ui.showToast('Island Anchored ⚓');
     }
   }
 
@@ -908,9 +1229,13 @@ export class XRManager {
         }
       }
 
+      // Update Hand Occlusion Depth Mask (prevents virtual models from clipping real hand)
+      if (this.occluderRight) this.occluderRight.update(this.handRight);
+
       // Update Forward-Render Hand Skeleton (always on top of virtual models)
       this.visualizerRight.update(this.handRight, this.isIndexPinchingRight, this.isMiddlePinchingRight);
     } else {
+      if (this.occluderRight) this.occluderRight.setVisible(false);
       this.visualizerRight.setVisible(false);
     }
 
@@ -953,8 +1278,10 @@ export class XRManager {
         }
       }
 
+      if (this.occluderLeft) this.occluderLeft.update(this.handLeft);
       this.visualizerLeft.update(this.handLeft, this.isIndexPinchingLeft, this.isMiddlePinchingLeft);
     } else {
+      if (this.occluderLeft) this.occluderLeft.setVisible(false);
       this.visualizerLeft.setVisible(false);
     }
   }
@@ -1035,14 +1362,9 @@ export class XRManager {
       }
     }
 
-    // 2. Middle Finger Pinch Rotation & Zoom (Hand Tracking)
-    const cam = this.renderer.xr.getCamera();
-    const camRight = new THREE.Vector3(1, 0, 0).applyQuaternion(cam.quaternion);
-    camRight.y = 0;
-    camRight.normalize();
-
+    // 2. Middle Finger Pinch: 1-Hand Move & Anchor vs 2-Hand Holographic Scale & Orbit
     if (this.isMiddlePinchingRight && this.isMiddlePinchingLeft) {
-      // Two-handed middle pinch: distance zooms, angle rotates!
+      // Two-handed middle pinch: distance zooms/scales, angle rotates!
       const pR = this.getPinchPoint(0, 'middle');
       const pL = this.getPinchPoint(1, 'middle');
 
@@ -1061,35 +1383,57 @@ export class XRManager {
       const angleDiff = curAngle - this.middlePinchInitialHandsAngle;
       this.dioramaRoot.rotation.y = this.middlePinchInitialDioramaRotY + angleDiff;
 
-    } else if (this.isMiddlePinchingRight) {
-      // Single hand (Right) Middle Finger Pinch:
-      // Horizontal motion relative to player view -> Rotate terrain
-      // Vertical motion -> Zoom (scale) terrain
-      const curPos = this.getPinchPoint(0, 'middle');
-      const deltaWorld = curPos.clone().sub(this.middlePinchStartPosRight);
-      const dx = deltaWorld.dot(camRight);
-      const dy = deltaWorld.y;
+      if (this.anchorBeam) this.anchorBeam.visible = false;
 
-      // Turntable rotation
-      this.dioramaRoot.rotation.y = this.middlePinchInitialDioramaRotY + dx * 4.5;
+    } else if (this.isMiddlePinchingRight || this.isMiddlePinchingLeft) {
+      // Single hand middle pinch (Right or Left): MOVE THE ISLAND IN 3D SPACE with your hand!
+      const handIndex = this.isMiddlePinchingRight ? 0 : 1;
+      const curHandPos = this.getPinchPoint(handIndex, 'middle');
+      const startHandPos = handIndex === 0 ? this.middlePinchStartPosRight : this.middlePinchStartPosLeft;
+      const deltaPos = curHandPos.clone().sub(startHandPos);
 
-      // Zoom / Scale Up and Down
-      const scaleFactor = 1.0 + dy * 3.0;
-      const newScale = THREE.MathUtils.clamp(this.middlePinchInitialDioramaScale * scaleFactor, 0.015, 0.35);
-      this.dioramaRoot.scale.setScalar(newScale);
+      // Translate island with hand movement
+      const targetPos = this.middlePinchInitialDioramaPos.clone().add(deltaPos);
 
-    } else if (this.isMiddlePinchingLeft) {
-      // Single hand (Left) Middle Finger Pinch
-      const curPos = this.getPinchPoint(1, 'middle');
-      const deltaWorld = curPos.clone().sub(this.middlePinchStartPosLeft);
-      const dx = deltaWorld.dot(camRight);
-      const dy = deltaWorld.y;
+      // In AR mode, snap smoothly to detected table/desk surface
+      if (this.surfaceReticle && this.surfaceReticle.visible) {
+        const distToSurface = Math.abs(targetPos.y - this.surfaceReticle.position.y);
+        if (distToSurface < 0.25) {
+          targetPos.y = THREE.MathUtils.lerp(targetPos.y, this.surfaceReticle.position.y + 0.10, 0.3);
+        }
+      }
 
-      this.dioramaRoot.rotation.y = this.middlePinchInitialDioramaRotY + dx * 4.5;
+      this.dioramaRoot.position.copy(targetPos);
 
-      const scaleFactor = 1.0 + dy * 3.0;
-      const newScale = THREE.MathUtils.clamp(this.middlePinchInitialDioramaScale * scaleFactor, 0.015, 0.35);
-      this.dioramaRoot.scale.setScalar(newScale);
+      // Rotate island with wrist yaw
+      const hand = handIndex === 0 ? this.handRight : this.handLeft;
+      let curYaw = this.middlePinchInitialHandYaw;
+      if (hand && hand.joints && hand.joints['wrist'] && hand.joints['wrist'].visible) {
+        const euler = new THREE.Euler().setFromQuaternion(hand.joints['wrist'].quaternion, 'YXZ');
+        curYaw = euler.y;
+      } else {
+        const ctrl = handIndex === 0 ? this.controllerRight : this.controllerLeft;
+        const euler = new THREE.Euler().setFromQuaternion(ctrl.quaternion, 'YXZ');
+        curYaw = euler.y;
+      }
+      const yawDelta = curYaw - this.middlePinchInitialHandYaw;
+      this.dioramaRoot.rotation.y = this.middlePinchInitialDioramaRotY + yawDelta;
+
+      // Update glowing Anchor Beam from pinching fingers down to anchor base
+      if (this.anchorBeam) {
+        const anchorWorldPos = new THREE.Vector3();
+        if (this.anchorGizmo) {
+          this.anchorGizmo.getWorldPosition(anchorWorldPos);
+        } else {
+          this.dioramaRoot.getWorldPosition(anchorWorldPos);
+        }
+
+        const posAttr = this.anchorBeam.geometry.attributes.position;
+        posAttr.setXYZ(0, curHandPos.x, curHandPos.y, curHandPos.z);
+        posAttr.setXYZ(1, anchorWorldPos.x, anchorWorldPos.y, anchorWorldPos.z);
+        posAttr.needsUpdate = true;
+        this.anchorBeam.visible = true;
+      }
 
     } else if (this.isGrippingRight || this.isGrippingLeft) {
       // Single controller grip move
@@ -1202,13 +1546,42 @@ export class XRManager {
   update(delta = 0.016) {
     if (!this.isXRPresenting) return;
 
-    // 1. Detect Hand Tracking (Joints, Index Pinch, Middle Pinch, Forward Render)
+    // 0. Update AR Foundation / WebXR Hit-Test for Surface Anchoring
+    const frame = this.renderer.xr.getFrame();
+    if (this.hitTestSource && frame) {
+      const hitTestResults = frame.getHitTestResults(this.hitTestSource);
+      if (hitTestResults.length > 0) {
+        const hit = hitTestResults[0];
+        const referenceSpace = this.renderer.xr.getReferenceSpace();
+        const hitPose = hit.getPose(referenceSpace);
+        if (hitPose) {
+          this.surfaceReticle.visible = true;
+          this.surfaceReticle.position.set(
+            hitPose.transform.position.x,
+            hitPose.transform.position.y,
+            hitPose.transform.position.z
+          );
+          this.lastHitTestResult = hit;
+        }
+      } else {
+        if (this.surfaceReticle) this.surfaceReticle.visible = false;
+      }
+    } else {
+      if (this.surfaceReticle) this.surfaceReticle.visible = false;
+    }
+
+    // Spin anchor crystal gem
+    if (this.anchorGem) {
+      this.anchorGem.rotation.y += delta * 1.2;
+    }
+
+    // 1. Detect Hand Tracking (Occlusion, Joints, Index Pinch, Middle Pinch, Forward Render)
     this.updateHandTracking(delta);
 
     // 2. Detect Left Palm Facing to Show / Hide 3D Menu
     this.updatePalmFacingMenu(delta);
 
-    // 3. Middle Finger Pinch for Rotation & Zoom / Scaling
+    // 3. Middle Finger Pinch for 3D Movement / Anchor & Zoom / Scaling
     this.updateManipulation(delta);
 
     // 4. Raycast against Left Palm Menu

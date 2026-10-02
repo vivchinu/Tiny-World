@@ -12,8 +12,8 @@ export class SceneManager {
     this.scene.background = new THREE.Color(0xdbeafe); // Soft daytime sky
     this.scene.fog = new THREE.FogExp2(0xdbeafe, 0.012);
 
-    // Camera
-    this.camera = new THREE.PerspectiveCamera(40, this.width / this.height, 0.5, 300);
+    // Camera (near plane 0.01m prevents close-up WebXR VR/AR clipping)
+    this.camera = new THREE.PerspectiveCamera(40, this.width / this.height, 0.01, 300);
     this.camera.position.set(22, 18, 24);
 
     // Renderer
