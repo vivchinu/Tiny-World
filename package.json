@@ -1,0 +1,22 @@
+{
+  "name": "tiny-world",
+  "version": "1.0.0",
+  "description": "Tiny World - 3D Procedural World-Building Experience inspired by Tiny Glade",
+  "main": "server.js",
+  "type": "module",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "keywords": [
+    "procedural",
+    "threejs",
+    "tinyglade",
+    "cozy",
+    "worldbuilding"
+  ],
+  "author": "",
+  "license": "MIT",
+  "dependencies": {
+    "selfsigned": "^5.5.0"
+  }
+}
