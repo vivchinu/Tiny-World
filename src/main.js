@@ -86,26 +86,26 @@ class TinyWorldApp {
 
   setupInteractionHandlers() {
     // Drag Start
-    this.raycaster.onDragStartCallback = (startPoint, tool, variation) => {
+    this.raycaster.onDragStartCallback = (startPoint, tool, variation, pointsHistory) => {
       this.removePreview();
 
       if (tool === 'tree' || tool === 'prop') {
         return;
       }
 
-      this.updatePreview(startPoint, startPoint, tool, variation);
+      this.updatePreview(startPoint, startPoint, tool, variation, pointsHistory);
     };
 
     // Drag Update (Move)
-    this.raycaster.onDragUpdateCallback = (startPoint, currentPoint, tool, variation) => {
+    this.raycaster.onDragUpdateCallback = (startPoint, currentPoint, tool, variation, pointsHistory) => {
       if (tool === 'tree' || tool === 'prop' || tool === 'inspect' || tool === 'demolish') {
         return;
       }
-      this.updatePreview(startPoint, currentPoint, tool, variation);
+      this.updatePreview(startPoint, currentPoint, tool, variation, pointsHistory);
     };
 
     // Drag End / Commit
-    this.raycaster.onDragEndCallback = (startPoint, endPoint, wasDragging, tool, variation) => {
+    this.raycaster.onDragEndCallback = (startPoint, endPoint, wasDragging, tool, variation, pointsHistory) => {
       this.removePreview();
 
       if (tool === 'inspect' || tool === 'demolish') return;
@@ -116,12 +116,12 @@ class TinyWorldApp {
         this.animSystem.animateHouse(house);
 
       } else if (tool === 'wall') {
-        const wall = this.generators.wall.createFromPoints(startPoint, endPoint, variation);
+        const wall = this.generators.wall.createFromPoints(startPoint, endPoint, variation, false, pointsHistory);
         this.world.addObject(wall);
         this.animSystem.animateWall(wall);
 
       } else if (tool === 'path') {
-        const path = this.generators.path.createFromPoints(startPoint, endPoint, variation);
+        const path = this.generators.path.createFromPoints(startPoint, endPoint, variation, false, pointsHistory);
         this.world.addObject(path);
         this.animSystem.animateGenericSpring(path);
 
@@ -165,15 +165,15 @@ class TinyWorldApp {
     };
   }
 
-  updatePreview(startPoint, currentPoint, tool, variation) {
+  updatePreview(startPoint, currentPoint, tool, variation, pointsHistory = null) {
     this.removePreview();
 
     if (tool === 'house') {
       this.currentPreview = this.generators.house.createFromPoints(startPoint, currentPoint, variation, true);
     } else if (tool === 'wall') {
-      this.currentPreview = this.generators.wall.createFromPoints(startPoint, currentPoint, variation, true);
+      this.currentPreview = this.generators.wall.createFromPoints(startPoint, currentPoint, variation, true, pointsHistory);
     } else if (tool === 'path') {
-      this.currentPreview = this.generators.path.createFromPoints(startPoint, currentPoint, variation, true);
+      this.currentPreview = this.generators.path.createFromPoints(startPoint, currentPoint, variation, true, pointsHistory);
     } else if (tool === 'pond') {
       this.currentPreview = this.generators.pond.createFromPoints(startPoint, currentPoint, variation, true);
     }

@@ -125,11 +125,11 @@ export class Radial3DMenu {
     const hubBaseGeo = new THREE.CylinderGeometry(0.046, 0.046, 0.012, 32);
     hubBaseGeo.rotateX(Math.PI / 2);
     const hubBaseMat = new THREE.MeshStandardMaterial({
-      color: 0x0f172a,
+      color: 0xffffff,
       roughness: 0.15,
-      metalness: 0.4,
+      metalness: 0.15,
       transparent: true,
-      opacity: 0.92,
+      opacity: 0.95,
       depthTest: true
     });
     this.hubBaseMesh = new THREE.Mesh(hubBaseGeo, hubBaseMat);
@@ -501,11 +501,11 @@ export class Radial3DMenu {
     this.selectVariation(this.activeToolId, vars[nextIdx].id);
   }
 
-  updateTitleCanvas(title, colorHex = '#fed7aa') {
+  updateTitleCanvas(title, colorHex = '#ea580c') {
     const ctx = this.titleCtx;
     ctx.clearRect(0, 0, 256, 72);
 
-    ctx.fillStyle = 'rgba(15, 23, 42, 0.85)';
+    ctx.fillStyle = 'rgba(255, 255, 255, 0.95)';
     ctx.beginPath();
     ctx.roundRect(16, 8, 224, 56, 28);
     ctx.fill();
@@ -514,7 +514,7 @@ export class Radial3DMenu {
     ctx.lineWidth = 3;
     ctx.stroke();
 
-    ctx.fillStyle = '#ffffff';
+    ctx.fillStyle = '#0f172a';
     ctx.font = 'bold 24px sans-serif';
     ctx.textAlign = 'center';
     ctx.textBaseline = 'middle';
@@ -547,11 +547,11 @@ export class Radial3DMenu {
       const discGeo = new THREE.CylinderGeometry(0.022, 0.022, 0.008, 24);
       discGeo.rotateX(Math.PI / 2);
       const discMat = new THREE.MeshStandardMaterial({
-        color: 0x1e293b,
-        roughness: 0.25,
-        metalness: 0.35,
+        color: 0xffffff,
+        roughness: 0.2,
+        metalness: 0.15,
         transparent: true,
-        opacity: 0.92,
+        opacity: 0.95,
         depthTest: true
       });
       const discMesh = new THREE.Mesh(discGeo, discMat);
@@ -948,13 +948,38 @@ export class Radial3DMenu {
 
     let leftPos = new THREE.Vector3();
     let leftQuat = new THREE.Quaternion();
+    let palmNormalWorld = new THREE.Vector3();
+    let isHandTracked = false;
 
     if (leftHand && leftHand.joints && leftHand.joints['wrist'] && leftHand.joints['wrist'].visible) {
       leftHand.joints['wrist'].getWorldPosition(leftPos);
       leftHand.joints['wrist'].getWorldQuaternion(leftQuat);
+      isHandTracked = true;
+
+      const jMid = leftHand.joints['middle-finger-metacarpal'];
+      const jIdx = leftHand.joints['index-finger-metacarpal'];
+      if (jMid && jIdx && jMid.visible && jIdx.visible) {
+        const pWrist = new THREE.Vector3();
+        const pMid = new THREE.Vector3();
+        const pIdx = new THREE.Vector3();
+        leftHand.joints['wrist'].getWorldPosition(pWrist);
+        jMid.getWorldPosition(pMid);
+        jIdx.getWorldPosition(pIdx);
+
+        const vFingers = pMid.sub(pWrist).normalize();
+        const vThumbSide = pIdx.sub(pWrist).normalize();
+
+        // Cross product for left hand points outward from palm face
+        palmNormalWorld.crossVectors(vFingers, vThumbSide).normalize();
+      } else {
+        const palmNormalLocal = new THREE.Vector3(0, 1, 0);
+        palmNormalWorld.copy(palmNormalLocal).applyQuaternion(leftQuat).normalize();
+      }
     } else if (this.xr.controllerLeft) {
       this.xr.controllerLeft.getWorldPosition(leftPos);
       this.xr.controllerLeft.getWorldQuaternion(leftQuat);
+      const palmNormalLocal = new THREE.Vector3(0, 0.7, -0.7).normalize();
+      palmNormalWorld.copy(palmNormalLocal).applyQuaternion(leftQuat).normalize();
     } else {
       this.isOpen = false;
       this.openProgress = THREE.MathUtils.lerp(this.openProgress, 0, delta * 12);
@@ -964,15 +989,11 @@ export class Radial3DMenu {
     // Vector from left hand to headset eyes
     const toHead = headPos.clone().sub(leftPos).normalize();
 
-    // Palm normal: points outward from the palm face
-    const palmNormalLocal = new THREE.Vector3(0.2, 0.85, -0.3).normalize();
-    const palmNormalWorld = palmNormalLocal.clone().applyQuaternion(leftQuat);
-
-    // Facing check: dot product > 0.15 means palm is tilted towards player's eyes
+    // Facing check: dot product > 0.12 means left palm face is tilted towards player's eyes
     const facingDot = palmNormalWorld.dot(toHead);
     const distToHead = leftPos.distanceTo(headPos);
 
-    this.isOpen = (facingDot > 0.15 && distToHead < 0.95);
+    this.isOpen = (facingDot > 0.12 && distToHead < 0.95);
 
     const targetProgress = this.isOpen ? 1.0 : 0.0;
     this.openProgress = THREE.MathUtils.lerp(this.openProgress, targetProgress, delta * 14.0);
@@ -980,7 +1001,7 @@ export class Radial3DMenu {
     if (this.openProgress > 0.02) {
       this.group.scale.setScalar(this.openProgress);
 
-      // Ergonomic placement: 12cm directly in front of the palm along line of sight to player's view!
+      // Ergonomic placement: 12cm directly in front of the palm facing the player's view!
       this.group.position.copy(leftPos).add(toHead.clone().multiplyScalar(0.12));
 
       // Billboard smoothly to face the player's eyes

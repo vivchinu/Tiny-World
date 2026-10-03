@@ -455,6 +455,7 @@ export class XRManager {
     this.isActionActive = false; // Index pinch / Trigger held
     this.dragStartLocal = new THREE.Vector3();
     this.dragCurrentLocal = new THREE.Vector3();
+    this.dragPointsLocal = [];
 
     // Modern 3D Radial Palm Menu
     this.radialMenu = null;
@@ -908,6 +909,7 @@ export class XRManager {
     this.isActionActive = true;
     this.dragStartLocal.copy(hitLocal);
     this.dragCurrentLocal.copy(hitLocal);
+    this.dragPointsLocal = [hitLocal.clone()];
 
     const tool = this.app.raycaster.currentTool;
     const variation = this.app.raycaster.activeVariation;
@@ -918,7 +920,7 @@ export class XRManager {
     }
 
     if (tool !== 'tree' && tool !== 'prop') {
-      this.app.updatePreview(this.dragStartLocal, this.dragStartLocal, tool, variation);
+      this.app.updatePreview(this.dragStartLocal, this.dragStartLocal, tool, variation, this.dragPointsLocal);
     }
   }
 
@@ -940,13 +942,13 @@ export class XRManager {
       this.pulseHaptic(this.controllerRight, 0.8, 80);
 
     } else if (tool === 'wall') {
-      const wall = this.app.generators.wall.createFromPoints(this.dragStartLocal, this.dragCurrentLocal, variation);
+      const wall = this.app.generators.wall.createFromPoints(this.dragStartLocal, this.dragCurrentLocal, variation, false, this.dragPointsLocal);
       this.app.world.addObject(wall);
       this.app.animSystem.animateWall(wall);
       this.pulseHaptic(this.controllerRight, 0.7, 60);
 
     } else if (tool === 'path') {
-      const path = this.app.generators.path.createFromPoints(this.dragStartLocal, this.dragCurrentLocal, variation);
+      const path = this.app.generators.path.createFromPoints(this.dragStartLocal, this.dragCurrentLocal, variation, false, this.dragPointsLocal);
       this.app.world.addObject(path);
       this.app.animSystem.animateGenericSpring(path);
       this.pulseHaptic(this.controllerRight, 0.6, 50);
@@ -1492,11 +1494,16 @@ export class XRManager {
         const hitLocal = this.worldToDioramaLocal(groundHit);
         this.dragCurrentLocal.copy(hitLocal);
 
+        const lastPt = this.dragPointsLocal[this.dragPointsLocal.length - 1];
+        if (!lastPt || lastPt.distanceTo(hitLocal) > 0.35) {
+          this.dragPointsLocal.push(hitLocal.clone());
+        }
+
         const tool = this.app.raycaster.currentTool;
         const variation = this.app.raycaster.activeVariation;
 
         if (tool !== 'tree' && tool !== 'prop' && tool !== 'inspect' && tool !== 'demolish') {
-          this.app.updatePreview(this.dragStartLocal, this.dragCurrentLocal, tool, variation);
+          this.app.updatePreview(this.dragStartLocal, this.dragCurrentLocal, tool, variation, this.dragPointsLocal);
         }
       }
     } else {

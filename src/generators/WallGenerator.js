@@ -28,7 +28,15 @@ export class WallGenerator {
     };
   }
 
-  createFromPoints(startPoint, endPoint, variation = 'stone', isPreview = false) {
+  createFromPoints(startPoint, endPoint, variation = 'stone', isPreview = false, pointsPath = null) {
+    if (pointsPath && Array.isArray(pointsPath) && pointsPath.length > 2) {
+      return this.generateFromPath({
+        pointsPath,
+        variation,
+        isPreview
+      });
+    }
+
     const dx = endPoint.x - startPoint.x;
     const dz = endPoint.z - startPoint.z;
     const length = Math.hypot(dx, dz);
@@ -49,6 +57,109 @@ export class WallGenerator {
       variation,
       isPreview
     });
+  }
+
+  generateFromPath(params) {
+    const { pointsPath, variation = 'stone', isPreview = false } = params;
+
+    const wallGroup = new THREE.Group();
+    wallGroup.userData = {
+      type: 'wall',
+      variation,
+      pointsPath: pointsPath.map(p => p.clone()),
+      segments: []
+    };
+
+    // Create a smooth 3D spline curve through all sampled points
+    const curve = new THREE.CatmullRomCurve3(pointsPath);
+    const totalLength = curve.getLength();
+
+    if (totalLength < 0.4) return wallGroup;
+
+    const segmentLen = 1.2;
+    const count = Math.max(1, Math.round(totalLength / segmentLen));
+    const wallHeight = (variation === 'wood') ? 1.0 : 1.35;
+    const wallThick = (variation === 'wood') ? 0.15 : 0.45;
+
+    // Start Pillar
+    const startPos = curve.getPointAt(0);
+    this.addPillar(wallGroup, startPos.x, startPos.z, wallHeight, wallThick, variation, isPreview);
+
+    for (let i = 0; i < count; i++) {
+      const tStart = i / count;
+      const tEnd = (i + 1) / count;
+      const tMid = (tStart + tEnd) / 2;
+
+      const pStart = curve.getPointAt(tStart);
+      const pEnd = curve.getPointAt(tEnd);
+      const pMid = curve.getPointAt(tMid);
+      const tangent = curve.getTangentAt(tMid);
+
+      const midX = pMid.x;
+      const midZ = pMid.z;
+      const groundY = this.terrain.getHeightAt(midX, midZ);
+      const dist = pStart.distanceTo(pEnd);
+      const angle = Math.atan2(tangent.x, tangent.z);
+
+      const segGroup = new THREE.Group();
+      segGroup.position.set(midX, groundY, midZ);
+      segGroup.rotation.y = angle;
+
+      if (variation === 'stone') {
+        const bodyGeo = new THREE.BoxGeometry(wallThick, wallHeight, dist);
+        const body = new THREE.Mesh(bodyGeo, this.materials.stoneWall);
+        body.position.y = wallHeight / 2;
+        body.castShadow = !isPreview;
+        body.receiveShadow = !isPreview;
+        segGroup.add(body);
+
+        const crenelGeo = new THREE.BoxGeometry(wallThick + 0.05, 0.35, dist * 0.38);
+        const crenel = new THREE.Mesh(crenelGeo, this.materials.stoneCap);
+        crenel.position.set(0, wallHeight + 0.175, 0);
+        crenel.castShadow = !isPreview;
+        segGroup.add(crenel);
+
+      } else if (variation === 'wood') {
+        const railGeo = new THREE.BoxGeometry(wallThick, 0.1, dist);
+        const topRail = new THREE.Mesh(railGeo, this.materials.woodFence);
+        topRail.position.y = wallHeight * 0.85;
+        topRail.castShadow = !isPreview;
+        segGroup.add(topRail);
+
+        const botRail = new THREE.Mesh(railGeo, this.materials.woodFence);
+        botRail.position.y = wallHeight * 0.45;
+        botRail.castShadow = !isPreview;
+        segGroup.add(botRail);
+
+      } else if (variation === 'hedge') {
+        const hedgeGeo = new THREE.BoxGeometry(wallThick * 1.4, wallHeight * 0.9, dist * 0.98);
+        const hedge = new THREE.Mesh(hedgeGeo, this.materials.hedgeLeaf);
+        hedge.position.y = wallHeight * 0.45;
+        hedge.castShadow = !isPreview;
+        segGroup.add(hedge);
+      }
+
+      wallGroup.add(segGroup);
+      wallGroup.userData.segments.push(segGroup);
+
+      // Pillar at joint
+      this.addPillar(wallGroup, pEnd.x, pEnd.z, wallHeight, wallThick, variation, isPreview);
+    }
+
+    if (isPreview) {
+      wallGroup.traverse((child) => {
+        if (child.isMesh) {
+          child.material = new THREE.MeshStandardMaterial({
+            color: 0xfde047,
+            transparent: true,
+            opacity: 0.45,
+            roughness: 0.3
+          });
+        }
+      });
+    }
+
+    return wallGroup;
   }
 
   generate(params) {

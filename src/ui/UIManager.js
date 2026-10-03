@@ -158,15 +158,20 @@ export class UIManager {
         const timeVals = { dawn: 6.5, noon: 12.0, sunset: 18.0, night: 22.5 };
         const val = timeVals[timeType] || 12.0;
         this.timeSlider.value = val;
-        this.app.sceneManager.setTimeOfDay(val);
+        this.showToast(`Updating Atmosphere (${timeType.toUpperCase()})... ☀️`);
         this.app.audio.playUIClick();
+        requestAnimationFrame(() => {
+          this.app.sceneManager.setTimeOfDay(val);
+        });
       });
     });
 
     this.timeSlider.addEventListener('input', (e) => {
       const val = parseFloat(e.target.value);
-      this.app.sceneManager.setTimeOfDay(val);
       this.timePills.forEach(p => p.classList.remove('active'));
+      requestAnimationFrame(() => {
+        this.app.sceneManager.setTimeOfDay(val);
+      });
     });
 
     // Weather
@@ -175,8 +180,11 @@ export class UIManager {
         this.weatherPills.forEach(p => p.classList.remove('active'));
         pill.classList.add('active');
         const weather = pill.dataset.weather;
-        this.app.sceneManager.setWeather(weather);
+        this.showToast(`Changing Weather (${weather.toUpperCase()})... 🌤️`);
         this.app.audio.playUIClick();
+        requestAnimationFrame(() => {
+          this.app.sceneManager.setWeather(weather);
+        });
       });
     });
 

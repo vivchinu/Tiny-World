@@ -118,6 +118,7 @@ export class RaycasterManager {
       this.isDragging = false;
       this.dragStart.copy(groundHit);
       this.dragCurrent.copy(groundHit);
+      this.pointsHistory = [groundHit.clone()];
 
       if (this.currentTool === 'demolish') {
         // Demolish check on pointer down or click
@@ -126,7 +127,7 @@ export class RaycasterManager {
       }
 
       if (this.onDragStartCallback) {
-        this.onDragStartCallback(this.dragStart, this.currentTool, this.activeVariation);
+        this.onDragStartCallback(this.dragStart, this.currentTool, this.activeVariation, this.pointsHistory);
       }
     });
 
@@ -153,8 +154,14 @@ export class RaycasterManager {
 
       if (this.isDragging && groundHit) {
         this.dragCurrent.copy(groundHit);
+
+        const lastPt = this.pointsHistory[this.pointsHistory.length - 1];
+        if (!lastPt || lastPt.distanceTo(groundHit) > 0.35) {
+          this.pointsHistory.push(groundHit.clone());
+        }
+
         if (this.onDragUpdateCallback) {
-          this.onDragUpdateCallback(this.dragStart, this.dragCurrent, this.currentTool, this.activeVariation);
+          this.onDragUpdateCallback(this.dragStart, this.dragCurrent, this.currentTool, this.activeVariation, this.pointsHistory);
         }
       }
     });
@@ -165,9 +172,15 @@ export class RaycasterManager {
       this.isPointerDown = false;
 
       const groundHit = this.getGroundIntersection() || this.dragCurrent;
+      if (this.pointsHistory && this.pointsHistory.length > 0) {
+        const lastPt = this.pointsHistory[this.pointsHistory.length - 1];
+        if (lastPt.distanceTo(groundHit) > 0.1) {
+          this.pointsHistory.push(groundHit.clone());
+        }
+      }
 
       if (this.onDragEndCallback && this.currentTool !== 'demolish') {
-        this.onDragEndCallback(this.dragStart, groundHit, this.isDragging, this.currentTool, this.activeVariation);
+        this.onDragEndCallback(this.dragStart, groundHit, this.isDragging, this.currentTool, this.activeVariation, this.pointsHistory);
       }
 
       this.isDragging = false;

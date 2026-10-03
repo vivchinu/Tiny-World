@@ -261,9 +261,20 @@ export class SceneManager {
       fogDensity = 0.018;
     }
 
-    this.scene.background = skyColor;
-    this.scene.fog.color = skyColor;
-    this.scene.fog.density = fogDensity;
+    const isAR = this.renderer.xr.isPresenting && this.renderer.xr.getSession() && this.renderer.xr.getSession().mode === 'immersive-ar';
+
+    if (!isAR) {
+      this.scene.background = skyColor;
+      if (this.scene.fog) {
+        this.scene.fog.color = skyColor;
+        this.scene.fog.density = fogDensity;
+      }
+    } else {
+      this.scene.background = null;
+      if (this.scene.fog) {
+        this.scene.fog.density = 0;
+      }
+    }
 
     this.sunLight.color = sunColor;
     this.sunLight.intensity = sunIntensity;
