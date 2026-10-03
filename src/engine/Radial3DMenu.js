@@ -986,14 +986,35 @@ export class Radial3DMenu {
       return;
     }
 
+    let isHandOpen = true;
+    if (isHandTracked) {
+      const jIdxTip = leftHand.joints['index-finger-tip'];
+      const jMidTip = leftHand.joints['middle-finger-tip'];
+      const jWrist = leftHand.joints['wrist'];
+
+      if (jIdxTip && jMidTip && jWrist && jIdxTip.visible && jMidTip.visible && jWrist.visible) {
+        const pWrist = new THREE.Vector3();
+        const pIdxTip = new THREE.Vector3();
+        const pMidTip = new THREE.Vector3();
+        jWrist.getWorldPosition(pWrist);
+        jIdxTip.getWorldPosition(pIdxTip);
+        jMidTip.getWorldPosition(pMidTip);
+
+        // Extended fingers distance from wrist (> 0.08m means open hand, not a fist or pinch)
+        const idxDist = pIdxTip.distanceTo(pWrist);
+        const midDist = pMidTip.distanceTo(pWrist);
+        isHandOpen = (idxDist > 0.08 && midDist > 0.08);
+      }
+    }
+
     // Vector from left hand to headset eyes
     const toHead = headPos.clone().sub(leftPos).normalize();
 
-    // Facing check: dot product > 0.12 means left palm face is tilted towards player's eyes
+    // Facing check: dot product > 0.18 means open left palm face is turned towards player's eyes
     const facingDot = palmNormalWorld.dot(toHead);
     const distToHead = leftPos.distanceTo(headPos);
 
-    this.isOpen = (facingDot > 0.12 && distToHead < 0.95);
+    this.isOpen = (isHandOpen && facingDot > 0.18 && distToHead < 0.95);
 
     const targetProgress = this.isOpen ? 1.0 : 0.0;
     this.openProgress = THREE.MathUtils.lerp(this.openProgress, targetProgress, delta * 14.0);

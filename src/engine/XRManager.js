@@ -662,7 +662,7 @@ export class XRManager {
     this.controllerLeft = this.renderer.xr.getController(1);
     this.scene.add(this.controllerLeft);
 
-    // Pointer Ray from Right Hand
+    // Pointer Ray from Right Hand (Line mesh hidden per user request, raycasting remains fully active)
     const beamGeo = new THREE.BufferGeometry().setFromPoints([
       new THREE.Vector3(0, 0, 0),
       new THREE.Vector3(0, 0, -3.5)
@@ -670,10 +670,11 @@ export class XRManager {
     const beamMat = new THREE.LineBasicMaterial({
       color: 0xf6ad55,
       transparent: true,
-      opacity: 0.8,
-      linewidth: 3
+      opacity: 0,
+      visible: false
     });
     this.pointerBeam = new THREE.Line(beamGeo, beamMat);
+    this.pointerBeam.visible = false;
     this.controllerRight.add(this.pointerBeam);
 
     // Reticle Ring on terrain
@@ -836,6 +837,7 @@ export class XRManager {
     }
 
     this.anchorGizmo.position.set(0, -1.35, 0);
+    this.anchorGizmo.visible = false;
     this.dioramaRoot.add(this.anchorGizmo);
 
     // Dynamic Tether / Anchor Beam connecting hand to anchor
@@ -846,9 +848,8 @@ export class XRManager {
     this.anchorBeamMat = new THREE.LineBasicMaterial({
       color: 0x38bdf8,
       transparent: true,
-      opacity: 0.85,
-      linewidth: 3,
-      depthTest: false
+      opacity: 0,
+      visible: false
     });
     this.anchorBeam = new THREE.Line(beamGeo, this.anchorBeamMat);
     this.anchorBeam.renderOrder = 9996;
@@ -1286,21 +1287,9 @@ export class XRManager {
       const yawDelta = curYaw - this.middlePinchInitialHandYaw;
       this.dioramaRoot.rotation.y = this.middlePinchInitialDioramaRotY + yawDelta;
 
-      // Update glowing Anchor Beam from pinching fingers down to anchor base
-      if (this.anchorBeam) {
-        const anchorWorldPos = new THREE.Vector3();
-        if (this.anchorGizmo) {
-          this.anchorGizmo.getWorldPosition(anchorWorldPos);
-        } else {
-          this.dioramaRoot.getWorldPosition(anchorWorldPos);
+        if (this.anchorBeam) {
+          this.anchorBeam.visible = false;
         }
-
-        const posAttr = this.anchorBeam.geometry.attributes.position;
-        posAttr.setXYZ(0, curHandPos.x, curHandPos.y, curHandPos.z);
-        posAttr.setXYZ(1, anchorWorldPos.x, anchorWorldPos.y, anchorWorldPos.z);
-        posAttr.needsUpdate = true;
-        this.anchorBeam.visible = true;
-      }
 
     } else if (this.isGrippingRight || this.isGrippingLeft) {
       // Single controller grip move
